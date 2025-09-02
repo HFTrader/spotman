@@ -22,7 +22,7 @@ Create an on-demand hibernation instance:
 Create an on-demand hibernation instance:
 ```bash
 ./spotman create --profile hibernation-ondemand --name prod01 --class production
-```sive Python script for managing AWS EC2 instances with hibernation support, spot instances, and modular YAML configuration.
+```
 
 ## Features
 
