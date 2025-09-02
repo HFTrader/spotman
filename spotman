@@ -364,14 +364,25 @@ class AWSInstanceManager:
             regions_file = user_regions_file
             print(f"Using regions config from user directory: {os.path.relpath(regions_file, user_config_dir)}")
         else:
-            # Fallback to git directory
-            regions_file = git_regions_file
-            if os.path.exists(regions_file):
-                print(f"Using regions config from git directory: {os.path.relpath(regions_file, os.path.dirname(os.path.abspath(__file__)))}")
+            # Check if git directory has regions.yaml
+            if os.path.exists(git_regions_file):
+                # Copy from git directory to user directory
+                print("Found regions.yaml in git directory, copying to user config directory...")
+                try:
+                    shutil.copy2(git_regions_file, user_regions_file)
+                    regions_file = user_regions_file
+                    print(f"✅ Copied regions.yaml to user config directory: {os.path.relpath(regions_file, user_config_dir)}")
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not copy regions.yaml to user directory: {e}")
+                    regions_file = git_regions_file
+                    print(f"Using regions config from git directory: {os.path.relpath(regions_file, os.path.dirname(os.path.abspath(__file__)))}")
             else:
-                regions_file = None
+                # No regions.yaml found anywhere, create a sample one in user directory
+                print("No regions.yaml found. Creating sample regions.yaml in user config directory...")
+                self._create_sample_regions_config(user_regions_file)
+                regions_file = user_regions_file
         
-        if not regions_file:
+        if not regions_file or not os.path.exists(regions_file):
             print(f"Warning: Regions configuration file 'regions.yaml' not found in user config (~/.spotman/) or git directory.")
             print("Using legacy profile format or create regions.yaml for region-agnostic profiles.")
             return {}
@@ -441,6 +452,13 @@ class AWSInstanceManager:
             self._create_sample_script(scripts_dir)
             print(f"✅ Created user scripts directory: {scripts_dir}")
             print("   You can now create custom scripts in ~/.spotman/scripts/")
+        
+        # Create regions.yaml if it doesn't exist
+        regions_file = os.path.join(config_dir, 'regions.yaml')
+        if not os.path.exists(regions_file):
+            self._create_sample_regions_config(regions_file)
+            print(f"✅ Created sample regions.yaml: {regions_file}")
+            print("   ⚠️  Please customize this file with your actual AWS resources!")
 
     def _create_sample_profile(self, profiles_dir: str) -> None:
         """Create a sample profile in the user profiles directory."""
@@ -588,6 +606,59 @@ echo "3. Test your changes on a new instance"
             print(f"   📄 Created sample script: {sample_script_path}")
         except Exception as e:
             print(f"   ⚠️  Warning: Could not create sample script: {e}")
+
+    def _create_sample_regions_config(self, regions_file_path: str) -> None:
+        """Create a sample regions.yaml file in the user config directory."""
+        sample_regions_content = """# SpotMan Region Configuration
+# This file contains region-specific settings that are used by all profiles
+# Customize this file with your AWS regions, AMI IDs, key pairs, and network settings
+
+# SSH Key Mappings - Maps AWS key pair names to local private key file paths
+ssh_keys:
+  my-keypair-us-east: "~/.ssh/my-keypair-us-east.pem"
+  my-keypair-us-west: "~/.ssh/my-keypair-us-west.pem"
+
+regions:
+  us-east-1:
+    # ami_id: "ami-12345678"  # Uncomment and replace with your preferred AMI
+    key_name: "my-keypair-us-east"
+    default_security_group_ids:
+      - "sg-0123456789abcdef0"  # Replace with your actual security group ID
+    default_subnet_id: "subnet-0123456789abcdef0"  # Replace with your actual subnet ID
+
+  us-west-2:
+    # ami_id: "ami-87654321"  # Uncomment and replace with your preferred AMI
+    key_name: "my-keypair-us-west"
+    default_security_group_ids:
+      - "sg-fedcba9876543210"  # Replace with your actual security group ID
+    default_subnet_id: "subnet-fedcba9876543210"  # Replace with your actual subnet ID
+
+# Default configuration applied when region-specific values are not found
+defaults:
+  instance_type: "t3.micro"
+  os_type: "ubuntu"
+  update_os: true
+  # ami_id: "ami-default123"  # Uncomment to set a global default AMI
+  spot_instance: false  # Set to true to use spot instances by default
+  hibernation_enabled: false  # Set to true to enable hibernation by default
+  root_volume_size: 20  # Root volume size in GB
+  root_volume_type: "gp3"  # EBS volume type (gp2, gp3, io1, io2)
+
+# Configuration Notes:
+# - Update the ssh_keys section with your actual key pair names and file paths
+# - Replace the security group IDs and subnet IDs with your actual AWS resources
+# - Uncomment and customize AMI IDs for specific regions or set a global default
+# - Add additional regions as needed following the same format
+# - This file is stored in ~/.spotman/regions.yaml and is specific to your user
+"""
+
+        try:
+            with open(regions_file_path, 'w') as f:
+                f.write(sample_regions_content)
+            print(f"   📄 Created sample regions.yaml: {regions_file_path}")
+            print("   ⚠️  Please customize this file with your actual AWS resources!")
+        except Exception as e:
+            print(f"   ⚠️  Warning: Could not create sample regions.yaml: {e}")
 
     def _get_last_used_region(self) -> Optional[str]:
         """Get the last used region from configuration."""
