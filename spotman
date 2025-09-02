@@ -151,26 +151,77 @@ class IncludeLoader(yaml.SafeLoader):
         """Include file referenced in !include directive."""
         filename = self.construct_scalar(node)
         
-        # Handle relative paths relative to SpotMan root directory
+        # Get user config directory
+        user_config_dir = os.path.expanduser('~/.spotman')
+        user_scripts_dir = os.path.join(user_config_dir, 'scripts')
+        
+        # Handle relative paths - check user config directory first, then git directory
         if not os.path.isabs(filename):
-            filename = os.path.join(self._root, filename)
+            # Check if filename contains a directory path (e.g., "scripts/myscript.sh")
+            if '/' in filename:
+                # Split filename into directory and basename
+                file_dir, file_basename = os.path.split(filename)
+                # Try user config subdirectory first
+                user_script_path = os.path.join(user_config_dir, file_dir, file_basename)
+                if os.path.exists(user_script_path):
+                    script_path = user_script_path
+                    print(f"Loaded external script from user config: {os.path.relpath(script_path, user_config_dir)}")
+                else:
+                    # Fallback to git directory
+                    git_script_path = os.path.join(self._root, filename)
+                    if os.path.exists(git_script_path):
+                        script_path = git_script_path
+                        print(f"Loaded external script from git directory: {os.path.relpath(script_path, self._root)}")
+                    else:
+                        script_path = None
+            else:
+                # No directory in filename, check both locations
+                user_script_path = os.path.join(user_scripts_dir, filename)
+                if os.path.exists(user_script_path):
+                    script_path = user_script_path
+                    print(f"Loaded external script from user config: {os.path.relpath(script_path, user_config_dir)}")
+                else:
+                    git_script_path = os.path.join(self._root, 'scripts', filename)
+                    if os.path.exists(git_script_path):
+                        script_path = git_script_path
+                        print(f"Loaded external script from git directory: {os.path.relpath(script_path, self._root)}")
+                    else:
+                        script_path = None
+        else:
+            # Absolute path
+            script_path = filename
+        
+        if not script_path or not os.path.exists(script_path):
+            print(f"Error: Include file '{filename}' not found")
+            
+            # List available scripts from both locations
+            available_scripts = []
+            
+            # Check user config scripts
+            if os.path.exists(user_scripts_dir):
+                user_scripts = [f for f in os.listdir(user_scripts_dir) if f.endswith('.sh')]
+                if user_scripts:
+                    available_scripts.extend([f"~/.spotman/scripts/{s}" for s in user_scripts])
+            
+            # Check git scripts
+            git_scripts_dir = os.path.join(self._root, 'scripts')
+            if os.path.exists(git_scripts_dir):
+                git_scripts = [f for f in os.listdir(git_scripts_dir) if f.endswith('.sh')]
+                if git_scripts:
+                    available_scripts.extend([f"git/scripts/{s}" for s in git_scripts])
+            
+            if available_scripts:
+                print("Available scripts:")
+                for script in available_scripts:
+                    print(f"  {script}")
+            sys.exit(1)
         
         try:
-            with open(filename, 'r') as f:
+            with open(script_path, 'r') as f:
                 content = f.read()
-                print(f"Loaded external script: {os.path.relpath(filename, self._root)}")
                 return content
-        except FileNotFoundError:
-            print(f"Error: Include file '{filename}' not found")
-            # List available scripts to help the user
-            scripts_dir = os.path.join(self._root, 'scripts')
-            if os.path.exists(scripts_dir):
-                available_scripts = [f for f in os.listdir(scripts_dir) if f.endswith('.sh')]
-                if available_scripts:
-                    print(f"Available scripts in scripts/: {', '.join(available_scripts)}")
-            sys.exit(1)
         except Exception as e:
-            print(f"Error reading include file '{filename}': {e}")
+            print(f"Error reading include file '{script_path}': {e}")
             sys.exit(1)
 
 
@@ -219,6 +270,9 @@ class AWSInstanceManager:
             # Load region configuration
             self.regions_config = self._load_regions_config()
             
+            # Initialize user config directories
+            self._initialize_user_config_dirs()
+            
         except NoCredentialsError:
             print("❌ AWS credentials not found or invalid.")
             print("Please configure your AWS credentials using one of these methods:")
@@ -247,41 +301,84 @@ class AWSInstanceManager:
 
     def load_profile(self, profile_name: str) -> Dict[str, Any]:
         """Load instance profile from YAML file with native !include support."""
-        # Construct the full path to the profile file
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        profile_path = os.path.join(script_dir, 'profiles', f'{profile_name}.yaml')
+        # Check user config directory first, then fallback to git directory
+        user_config_dir = self._get_config_dir()
+        user_profiles_dir = os.path.join(user_config_dir, 'profiles')
+        git_profiles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'profiles')
+        
+        # Try user config directory first
+        user_profile_path = os.path.join(user_profiles_dir, f'{profile_name}.yaml')
+        if os.path.exists(user_profile_path):
+            profile_path = user_profile_path
+            print(f"Using profile from user config: {os.path.relpath(profile_path, user_config_dir)}")
+        else:
+            # Fallback to git directory
+            profile_path = os.path.join(git_profiles_dir, f'{profile_name}.yaml')
+            if os.path.exists(profile_path):
+                print(f"Using profile from git directory: {os.path.relpath(profile_path, os.path.dirname(os.path.abspath(__file__)))}")
+            else:
+                profile_path = None
+        
+        if not profile_path:
+            print(f"Error: Profile '{profile_name}' not found.")
+            
+            # List available profiles from both locations
+            available_profiles = []
+            
+            # Check user config profiles
+            if os.path.exists(user_profiles_dir):
+                user_profiles = [f[:-5] for f in os.listdir(user_profiles_dir) if f.endswith('.yaml')]
+                if user_profiles:
+                    available_profiles.extend([f"~/.spotman/profiles/{p}" for p in user_profiles])
+            
+            # Check git profiles
+            if os.path.exists(git_profiles_dir):
+                git_profiles = [f[:-5] for f in os.listdir(git_profiles_dir) if f.endswith('.yaml')]
+                if git_profiles:
+                    available_profiles.extend([f"git/profiles/{p}" for p in git_profiles])
+            
+            if available_profiles:
+                print("Available profiles:")
+                for profile in available_profiles:
+                    print(f"  {profile}")
+            sys.exit(1)
         
         try:
             with open(profile_path, 'r') as f:
                 profile = yaml.load(f, Loader=IncludeLoader)
             
             return profile
-        except FileNotFoundError:
-            print(f"Error: Profile '{profile_name}' not found at '{profile_path}'.")
-            # List available profiles to help the user
-            profiles_dir = os.path.join(script_dir, 'profiles')
-            if os.path.exists(profiles_dir):
-                available_profiles = [f[:-5] for f in os.listdir(profiles_dir) if f.endswith('.yaml')]
-                if available_profiles:
-                    print(f"Available profiles: {', '.join(available_profiles)}")
-            sys.exit(1)
         except yaml.YAMLError as e:
             print(f"Error parsing YAML profile: {e}")
             sys.exit(1)
 
     def _load_regions_config(self) -> Dict[str, Any]:
         """Load region configuration from regions.yaml file."""
-        # Look for regions.yaml in the same directory as the script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        regions_file = os.path.join(script_dir, 'regions.yaml')
+        # Check user config directory first, then fallback to git directory
+        user_config_dir = self._get_config_dir()
+        user_regions_file = os.path.join(user_config_dir, 'regions.yaml')
+        git_regions_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'regions.yaml')
+        
+        # Try user config directory first
+        if os.path.exists(user_regions_file):
+            regions_file = user_regions_file
+            print(f"Using regions config from user directory: {os.path.relpath(regions_file, user_config_dir)}")
+        else:
+            # Fallback to git directory
+            regions_file = git_regions_file
+            if os.path.exists(regions_file):
+                print(f"Using regions config from git directory: {os.path.relpath(regions_file, os.path.dirname(os.path.abspath(__file__)))}")
+            else:
+                regions_file = None
+        
+        if not regions_file:
+            print(f"Warning: Regions configuration file 'regions.yaml' not found in user config (~/.spotman/) or git directory.")
+            print("Using legacy profile format or create regions.yaml for region-agnostic profiles.")
+            return {}
         
         try:
             with open(regions_file, 'r') as f:
                 return yaml.safe_load(f)
-        except FileNotFoundError:
-            print(f"Warning: Regions configuration file '{regions_file}' not found.")
-            print("Using legacy profile format or create regions.yaml for region-agnostic profiles.")
-            return {}
         except yaml.YAMLError as e:
             print(f"Error parsing regions configuration: {e}")
             sys.exit(1)
@@ -324,6 +421,24 @@ class AWSInstanceManager:
         if not os.path.exists(config_dir):
             os.makedirs(config_dir)
         return config_dir
+
+    def _initialize_user_config_dirs(self) -> None:
+        """Initialize user configuration directories for profiles and scripts."""
+        config_dir = self._get_config_dir()
+        
+        # Create profiles directory
+        profiles_dir = os.path.join(config_dir, 'profiles')
+        if not os.path.exists(profiles_dir):
+            os.makedirs(profiles_dir)
+            print(f"✅ Created user profiles directory: {profiles_dir}")
+            print("   You can now create custom profiles in ~/.spotman/profiles/")
+        
+        # Create scripts directory
+        scripts_dir = os.path.join(config_dir, 'scripts')
+        if not os.path.exists(scripts_dir):
+            os.makedirs(scripts_dir)
+            print(f"✅ Created user scripts directory: {scripts_dir}")
+            print("   You can now create custom scripts in ~/.spotman/scripts/")
 
     def _get_last_used_region(self) -> Optional[str]:
         """Get the last used region from configuration."""

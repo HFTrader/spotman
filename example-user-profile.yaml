@@ -1,0 +1,41 @@
+# Example User Profile - Custom Development Environment
+# This is an example profile stored in your user config directory (~/.spotman/profiles/)
+# You can modify this file to create your own custom instance configurations
+
+# Instance configuration
+instance_type: "t3.medium"  # Balanced performance for development
+spot_instance: false  # Use on-demand for reliability
+hibernation_enabled: false  # Standard instance without hibernation
+
+# Storage configuration
+root_volume_size: 30  # GB - more space for development
+root_volume_type: "gp3"  # Fast, cost-effective storage
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true  # Keep system current
+
+# Enhanced user data for custom development environment
+user_data: !include scripts/custom-dev-setup.sh
+
+# Tags for custom development instances
+tags:
+  ApplicationClass: "custom-dev"
+  Environment: "development"
+  InstanceType: "on-demand"
+  Purpose: "custom-development"
+  ManagedBy: "spotman"
+  Owner: "user"
+
+# Notes:
+# - Custom development environment with your preferred tools
+# - Uses external script from ~/.spotman/scripts/custom-dev-setup.sh
+# - On-demand instance for consistent availability
+# - Larger root volume for development work
+# - Ready for your custom development workflow
+#
+# Usage:
+#   ./spotman create --profile example-user-profile --name mydev01
+#
+# This profile demonstrates how you can create and use custom profiles
+# stored in your user configuration directory.
