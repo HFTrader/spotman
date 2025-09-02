@@ -349,10 +349,10 @@ SpotMan now supports truly region-agnostic profiles using external region config
 
 ### External Region Configuration
 
-Region-specific settings (AMI IDs, key pairs, network settings) are stored in a separate `regions.yaml` file:
+Region-specific settings (AMI IDs, key pairs, network settings) are stored in a separate `regions.yaml` file in your user config directory (`~/.spotman/regions.yaml`):
 
 ```yaml
-# regions.yaml - External region configuration
+# ~/.spotman/regions.yaml - External region configuration
 regions:
   us-east-1:
     # ami_id: "ami-override123"  # Optional: override default AMI
@@ -407,7 +407,7 @@ tags:
 - **Smart Defaults**: Remembers last used region for convenience
 
 ### Setup Process
-1. **Configure regions.yaml**: Set up AMI IDs, key pairs, and network defaults for each region
+1. **Configure regions.yaml**: Set up AMI IDs, key pairs, and network defaults for each region in `~/.spotman/regions.yaml`
 2. **Create application profiles**: Focus only on application-specific configuration
 3. **Set default region**: `./spotman region set us-west-2` (optional)
 4. **Deploy anywhere**: Same profile works across all configured regions

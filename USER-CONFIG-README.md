@@ -10,6 +10,7 @@ By default, SpotMan creates the following directory structure in your home direc
 ~/.spotman/
 ├── profiles/          # Your custom instance profiles
 ├── scripts/           # Your custom setup scripts
+├── regions.yaml       # Your region-specific configuration
 ├── backups/           # SSH config backups
 ├── ssh_config         # SpotMan's SSH configuration
 └── config.yaml        # SpotMan configuration
@@ -61,6 +62,33 @@ This means:
    ```yaml
    user_data: !include scripts/my-setup.sh
    ```
+
+## Configuring Regions
+
+SpotMan uses `regions.yaml` to define region-specific settings like AMI IDs, key pairs, and network configurations:
+
+1. **Automatic Setup**: If `regions.yaml` doesn't exist, SpotMan creates a sample file automatically
+2. **Migration**: If you had a `regions.yaml` in the git directory, it's automatically copied to your user config
+3. **Customization**: Edit `~/.spotman/regions.yaml` with your actual AWS resources
+
+### Sample regions.yaml structure:
+```yaml
+# SSH Key Mappings
+ssh_keys:
+  my-keypair-us-east: "~/.ssh/my-keypair-us-east.pem"
+
+regions:
+  us-east-1:
+    key_name: "my-keypair-us-east"
+    default_security_group_ids:
+      - "sg-0123456789abcdef0"
+    default_subnet_id: "subnet-0123456789abcdef0"
+
+defaults:
+  instance_type: "t3.micro"
+  os_type: "ubuntu"
+  update_os: true
+```
 
 ## Examples
 
