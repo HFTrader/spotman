@@ -56,6 +56,53 @@ pip install -r requirements.txt
 chmod +x spotman
 ```
 
+## User Configuration Directory
+
+SpotMan supports user-defined profiles and scripts stored outside the git repository. This allows you to create custom configurations without modifying the main SpotMan codebase.
+
+### Directory Structure
+
+SpotMan automatically creates the following directory structure in your home directory:
+
+```
+~/.spotman/
+├── profiles/          # Your custom instance profiles
+├── scripts/           # Your custom setup scripts
+├── backups/           # SSH config backups
+├── ssh_config         # SpotMan's SSH configuration
+└── config.yaml        # SpotMan configuration
+```
+
+### Priority System
+
+When SpotMan looks for profiles, scripts, or configuration files, it follows this priority order:
+
+1. **User Config Directory First** (`~/.spotman/`) - Your custom files
+2. **Git Directory Fallback** - The original SpotMan files
+
+This means you can override any profile or script by creating a file with the same name in your user config directory.
+
+### Getting Started
+
+The first time you run SpotMan, it will automatically create the `~/.spotman/` directory structure with sample files:
+
+- `~/.spotman/profiles/example-profile.yaml` - Example profile to customize
+- `~/.spotman/scripts/example-setup.sh` - Example setup script to modify
+
+Simply copy these files and modify them for your needs:
+
+```bash
+cp ~/.spotman/profiles/example-profile.yaml ~/.spotman/profiles/my-profile.yaml
+cp ~/.spotman/scripts/example-setup.sh ~/.spotman/scripts/my-setup.sh
+```
+
+Then use your custom profiles:
+```bash
+./spotman create --profile my-profile --name myinstance
+```
+
+For detailed information, see `USER-CONFIG-README.md`.
+
 ## Usage
 
 ### Create an Instance

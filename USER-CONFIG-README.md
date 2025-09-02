@@ -31,7 +31,7 @@ This means:
 
 1. Create a profile file in `~/.spotman/profiles/`:
    ```bash
-   cp /path/to/spotman/example-user-profile.yaml ~/.spotman/profiles/my-profile.yaml
+   cp ~/.spotman/profiles/example-profile.yaml ~/.spotman/profiles/my-profile.yaml
    ```
 
 2. Edit the profile to match your requirements:
@@ -52,7 +52,7 @@ This means:
 
 1. Create a setup script in `~/.spotman/scripts/`:
    ```bash
-   cp /path/to/spotman/custom-dev-setup.sh ~/.spotman/scripts/my-setup.sh
+   cp ~/.spotman/scripts/example-setup.sh ~/.spotman/scripts/my-setup.sh
    ```
 
 2. Edit the script to install your preferred tools and configurations
@@ -65,13 +65,13 @@ This means:
 ## Examples
 
 ### Example Profile
-See `example-user-profile.yaml` for a complete example profile that demonstrates:
+See `~/.spotman/profiles/example-profile.yaml` for a complete example profile that demonstrates:
 - Custom instance configuration
 - Reference to user scripts
 - Proper tagging and documentation
 
 ### Example Script
-See `custom-dev-setup.sh` for a complete example setup script that demonstrates:
+See `~/.spotman/scripts/example-setup.sh` for a complete example setup script that demonstrates:
 - System updates and package installation
 - Development tool setup
 - Environment configuration

@@ -426,19 +426,168 @@ class AWSInstanceManager:
         """Initialize user configuration directories for profiles and scripts."""
         config_dir = self._get_config_dir()
         
-        # Create profiles directory
+        # Create profiles directory and sample profile
         profiles_dir = os.path.join(config_dir, 'profiles')
         if not os.path.exists(profiles_dir):
             os.makedirs(profiles_dir)
+            self._create_sample_profile(profiles_dir)
             print(f"✅ Created user profiles directory: {profiles_dir}")
             print("   You can now create custom profiles in ~/.spotman/profiles/")
         
-        # Create scripts directory
+        # Create scripts directory and sample script
         scripts_dir = os.path.join(config_dir, 'scripts')
         if not os.path.exists(scripts_dir):
             os.makedirs(scripts_dir)
+            self._create_sample_script(scripts_dir)
             print(f"✅ Created user scripts directory: {scripts_dir}")
             print("   You can now create custom scripts in ~/.spotman/scripts/")
+
+    def _create_sample_profile(self, profiles_dir: str) -> None:
+        """Create a sample profile in the user profiles directory."""
+        sample_profile_path = os.path.join(profiles_dir, 'sample-profile.yaml')
+        
+        sample_profile_content = """# Sample User Profile - Getting Started
+# This is a sample profile created automatically for you.
+# Modify this file to create your own custom instance configurations.
+
+# Instance configuration
+instance_type: "t3.micro"  # Cost-effective general purpose instance
+spot_instance: false  # Use on-demand for reliability
+hibernation_enabled: false  # Standard instance without hibernation
+
+# Storage configuration
+root_volume_size: 20  # GB - sufficient for most workloads
+root_volume_type: "gp3"  # Fast, cost-effective storage
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true  # Keep system current
+
+# User data script (uncomment and modify path as needed)
+# user_data: !include scripts/sample-setup.sh
+
+# Tags for sample instances
+tags:
+  ApplicationClass: "sample"
+  Environment: "development"
+  InstanceType: "on-demand"
+  Purpose: "sample-workload"
+  ManagedBy: "spotman"
+  Owner: "user"
+
+# Notes:
+# - This is a basic sample profile to get you started
+# - Modify the instance_type, storage, and other settings as needed
+# - Uncomment the user_data line and create a setup script if desired
+# - Add your own tags and configuration options
+#
+# Usage:
+#   ./spotman create --profile sample-profile --name my-sample-instance
+#
+# To create your own profile:
+#   cp ~/.spotman/profiles/sample-profile.yaml ~/.spotman/profiles/my-profile.yaml
+#   # Then edit my-profile.yaml with your desired configuration
+"""
+        
+        try:
+            with open(sample_profile_path, 'w') as f:
+                f.write(sample_profile_content)
+            print(f"   📄 Created sample profile: {sample_profile_path}")
+        except Exception as e:
+            print(f"   ⚠️  Warning: Could not create sample profile: {e}")
+
+    def _create_sample_script(self, scripts_dir: str) -> None:
+        """Create a sample script in the user scripts directory."""
+        sample_script_path = os.path.join(scripts_dir, 'sample-setup.sh')
+        
+        sample_script_content = """#!/bin/bash
+set -e
+
+# Sample User Setup Script
+# This is a sample setup script created automatically for you.
+# Modify this file to install your preferred tools and configurations.
+
+# AWS Instance Metadata Service endpoint
+AWS_METADATA_SERVER="http://169.254.169.254"
+
+# Logging
+exec > >(tee /var/log/user-data.log) 2>&1
+echo "Sample user setup started at $(date)"
+
+# Get instance metadata
+INSTANCE_ID=$(curl -s $AWS_METADATA_SERVER/latest/meta-data/instance-id)
+REGION=$(curl -s $AWS_METADATA_SERVER/latest/meta-data/placement/region)
+
+echo "Instance: $INSTANCE_ID in region: $REGION"
+
+# System updates
+echo "Updating system packages..."
+apt-get update && apt-get upgrade -y
+
+# Install your preferred development tools
+echo "Installing sample development tools..."
+apt-get install -y \\
+  htop \\
+  curl wget \\
+  git \\
+  vim nano \\
+  python3-pip \\
+  build-essential
+
+# Configure git (customize as needed)
+git config --system init.defaultBranch main
+git config --system user.name "SpotMan User"
+git config --system user.email "user@spotman.local"
+
+# Create workspace directories
+mkdir -p /home/ubuntu/projects
+chown ubuntu:ubuntu /home/ubuntu/projects
+
+# Create a simple info script
+cat > /home/ubuntu/instance-info.sh << 'EOF'
+#!/bin/bash
+
+# AWS Instance Metadata Service endpoint
+AWS_METADATA_SERVER="http://169.254.169.254"
+
+echo "=== Sample Instance Info ==="
+echo "Instance ID: $(curl -s $AWS_METADATA_SERVER/latest/meta-data/instance-id)"
+echo "Region: $(curl -s $AWS_METADATA_SERVER/latest/meta-data/placement/region)"
+echo "Instance Type: $(curl -s $AWS_METADATA_SERVER/latest/meta-data/instance-type)"
+echo "Setup: Sample configuration"
+echo "Uptime: $(uptime)"
+echo ""
+echo "Directories:"
+echo "  ~/projects - Your workspace"
+echo ""
+echo "Next steps:"
+echo "1. Customize this setup script for your needs"
+echo "2. Add your preferred tools and configurations"
+echo "3. Test with: ./instance-info.sh"
+EOF
+chmod +x /home/ubuntu/instance-info.sh
+chown ubuntu:ubuntu /home/ubuntu/instance-info.sh
+
+# Mark setup completion
+echo "$(date)" > /tmp/sample-setup-complete
+touch /tmp/sample-setup-complete
+
+echo "Sample setup completed successfully at $(date)"
+echo ""
+echo "To customize this setup:"
+echo "1. Edit ~/.spotman/scripts/sample-setup.sh"
+echo "2. Add your preferred tools and configurations"
+echo "3. Test your changes on a new instance"
+"""
+
+        try:
+            with open(sample_script_path, 'w') as f:
+                f.write(sample_script_content)
+            # Make the script executable
+            os.chmod(sample_script_path, 0o755)
+            print(f"   📄 Created sample script: {sample_script_path}")
+        except Exception as e:
+            print(f"   ⚠️  Warning: Could not create sample script: {e}")
 
     def _get_last_used_region(self) -> Optional[str]:
         """Get the last used region from configuration."""
