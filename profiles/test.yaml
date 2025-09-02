@@ -1,0 +1,36 @@
+# Test Profile
+# Minimal test profile for quick instance creation and development
+# Region-agnostic configuration using regions.yaml system
+
+# Instance configuration
+instance_type: "t3.micro"  # Smallest instance for testing
+spot_instance: false  # On-demand for reliability during testing
+hibernation_enabled: false  # Not needed for test instances
+
+# Storage configuration
+root_volume_size: 8  # GB - minimal storage for testing
+root_volume_type: "gp3"  # Modern EBS type
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true  # Keep test instances updated
+
+# Simple user data for testing using external script
+user_data: !include scripts/test-setup.sh
+
+# Tags for test instances
+tags:
+  ApplicationClass: "test"
+  Environment: "development"
+  Purpose: "testing"
+  ManagedBy: "spotman"
+  
+# Notes:
+# - Minimal configuration for quick testing
+# - Uses t3.micro for cost efficiency
+# - Basic development tools included via external script
+# - Script located at scripts/test-setup.sh
+# - Logs available at /var/log/user-data.log
+#
+# Usage:
+#   ./spotman --region sa-east-1 create --profile test --name test01

@@ -1,0 +1,38 @@
+# Simple Spot Instance Profile
+# Basic spot instance with essential setup for development work
+# Spot instances provide significant cost savings
+
+# Instance configuration
+instance_type: "m5.large"  # Good balance of performance and cost
+spot_instance: true  # Use spot pricing for cost savings
+hibernation_enabled: false  # Can be enabled on spot instances (AWS now supports this)
+
+# Storage configuration
+root_volume_size: 20  # GB - adequate for development
+root_volume_type: "gp3"  # Fast, cost-effective storage
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true  # Keep system current
+
+# Enhanced user data for development environment
+user_data: !include scripts/simple-spot-setup.sh
+
+# Tags for simple spot instances
+tags:
+  ApplicationClass: "simple-spot"
+  Environment: "development"
+  InstanceType: "spot"
+  Purpose: "development-workload"
+  ManagedBy: "spotman"
+  
+# Notes:
+# - Spot instance for cost-effective development
+# - Pre-configured with common development tools via external script
+# - Script located at scripts/simple-spot-setup.sh
+# - Node.js, Python, and build tools included
+# - Ready for general development work
+# - Run ./info.sh on instance for environment details
+#
+# Usage:
+#   ./spotman --region sa-east-1 create --profile simple-spot --name dev01

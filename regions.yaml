@@ -1,0 +1,34 @@
+# SpotMan Region Configuration
+# This file contains region-specific settings that are used by all profiles
+
+# SSH Key Mappings - Maps AWS key pair names to local private key file paths
+ssh_keys:
+  amz-br: "~/.ssh/amz-br.pem"
+  amz-us: "~/.ssh/amz-us.pem"
+
+regions:
+  sa-east-1:
+    ami_id: "ami-0d6d5b74032865309"  
+    key_name: "amz-br"
+    default_security_group_ids:
+      - "sg-1f88567a"  # Replace with your actual security group ID
+    default_subnet_id: ""  # Replace with your actual subnet ID
+
+  us-east-1:
+    ami_id: "ami-0360c520857e3138f"  
+    key_name: "amz-us"
+    # Default security group and subnet for this region
+    default_security_group_ids:
+      - "sg-914dd4f5"
+    default_subnet_id: ""
+
+# Default configuration applied when region-specific values are not found
+defaults:
+  instance_type: "t3.micro"
+  os_type: "ubuntu"
+  update_os: true
+  ami_id: "ami-0360c520857e3138f"  # Default Ubuntu AMI
+  spot_instance: false  # Set to true to use spot instances
+  hibernation_enabled: false  # Set to true to enable hibernation (requires supported instance types)
+  root_volume_size: 8  # Root volume size in GB
+  root_volume_type: "gp3"  # EBS volume type (gp2, gp3, io1, io2)

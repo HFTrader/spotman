@@ -1,0 +1,75 @@
+# Hibernation-Enabled Spot Instance Profile
+## Key Benefits:
+# 🚀 Cost-effective spot pricing
+# 🔄 Hibernation state preservation  
+# ⚡ Fast resume from hibernation (when available)
+# 💾 Memory contents preserved
+# 🛡️ Automatic encryption
+#
+# Important Hibernation + Spot Limitations:
+# ⚠️  Manual Resume Challenges: Hibernated spot instances may not be manually resumable
+# ⚠️  AWS Auto-Resume: AWS may automatically restart when spot capacity becomes available
+# ⚠️  Spot Request State: Hibernation can disable the associated spot request
+# ⚠️  Alternative: For guaranteed hibernation resume, use hibernation-ondemand profile
+#
+# Best Use Cases:
+# ✅ Long-running batch jobs that can tolerate restart delays
+# ✅ Development environments where cost is more important than instant resume
+# ✅ Workloads that can wait for AWS automatic restart
+#
+# For Guaranteed Resume: Use hibernation-ondemand profile for production workloads
+#
+# Usage:
+#   ./spotman --region sa-east-1 create --profile spot-hibernation --name hibernate-spot01now supports hibernation on spot instances using InstanceMarketOptions
+# This uses the modern run_instances API with spot configuration
+
+# Instance configuration
+instance_type: "m5.large"  # Hibernation-compatible instance family
+spot_instance: true  # Now supports hibernation with InstanceMarketOptions!
+hibernation_enabled: true  # Enable hibernation capability
+
+# Storage configuration
+root_volume_size: 20  # GB - adequate for hibernation image
+root_volume_type: "gp3"  # Fast storage for hibernation performance
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true  # Keep system current
+
+# Enhanced user data script for hibernation setup
+user_data: !include scripts/hibernation-setup.sh
+
+# Tags for hibernation-capable spot instances
+tags:
+  ApplicationClass: "hibernation"
+  Environment: "development"
+  InstanceType: "spot"
+  HibernationEnabled: "true"
+  Purpose: "hibernation-testing"
+  ManagedBy: "spotman"
+  
+# Enhanced Features:
+# ✅ Spot instances with hibernation support (NEW!)
+# ✅ Uses modern InstanceMarketOptions API approach
+# ✅ All hibernation features available on spot instances
+# ✅ Significant cost savings with hibernation capability
+# ✅ Encrypted root volume (automatic with hibernation)
+# ✅ Comprehensive hibernation setup and management scripts
+#
+# Hibernation Requirements Met:
+# ✓ Spot instance with hibernation support (NOW AVAILABLE!)
+# ✓ Hibernation-compatible instance family (M5)
+# ✓ Encrypted root volume (automatic)
+# ✓ Adequate swap space (RAM + buffer)
+# ✓ Hibernation packages installed
+# ✓ Management scripts included
+#
+# Key Benefits:
+# � Cost-effective spot pricing
+# 🔄 Hibernation state preservation
+# ⚡ Fast resume from hibernation
+# � Memory contents preserved
+# 🛡️ Automatic encryption
+#
+# Usage:
+#   ./spotman --region sa-east-1 create --profile spot-hibernation --name hibernate-spot01

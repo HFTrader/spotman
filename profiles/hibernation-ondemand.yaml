@@ -1,0 +1,36 @@
+# On-Demand Hibernation Profile
+# Traditional hibernation instance for comparison with spot hibernation
+
+# Instance configuration
+instance_type: "m5.large"  # Hibernation-compatible instance family
+spot_instance: false  # On-demand instance
+hibernation_enabled: true  # Enable hibernation capability
+
+# Storage configuration
+root_volume_size: 20  # GB - adequate for hibernation image
+root_volume_type: "gp3"  # Fast storage for hibernation performance
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true  # Keep system current
+
+# Enhanced user data script for hibernation setup
+user_data: !include scripts/hibernation-setup.sh
+
+# Tags for on-demand hibernation instances
+tags:
+  ApplicationClass: "hibernation"
+  Environment: "development"
+  InstanceType: "on-demand"
+  HibernationEnabled: "true"
+  Purpose: "hibernation-testing"
+  ManagedBy: "spotman"
+
+# Notes:
+# - On-demand hibernation instance for guaranteed availability
+# - More expensive than spot but guaranteed capacity
+# - Same hibernation features as spot hibernation
+# - Use for production workloads requiring hibernation
+#
+# Usage:
+#   ./spotman --region sa-east-1 create --profile hibernation-ondemand --name hibernate-od01

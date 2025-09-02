@@ -1,0 +1,49 @@
+# Web Server Profile
+# Modern SpotMan profile that leverages the new regions.yaml configuration system
+# This profile demonstrates region-agnostic web server deployment with user data execution
+
+# Instance configuration
+instance_type: "t3.small"  # Upgraded from micro for better performance
+spot_instance: false  # On-demand instance for production web server reliability
+hibernation_enabled: false  # Not needed for web servers
+
+# Storage configuration
+root_volume_size: 20  # GB - sufficient for web server and logs
+root_volume_type: "gp3"  # Latest generation EBS for better performance
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true  # Automatically update the OS during bootstrap
+
+# User data script - references external script file using native YAML include
+user_data: !include scripts/webserver-setup.sh
+
+# Tags for multi-region web server
+tags:
+  ApplicationClass: "web-server"
+  Environment: "production"
+  Owner: "web-team"
+  MultiRegion: "true"
+  Purpose: "web-server-deployment"
+  ManagedBy: "spotman"
+  
+# Notes:
+# - This profile uses the new regions.yaml system for region-specific configuration
+# - AMI IDs, key names, security groups, and subnets are automatically selected per region
+# - User data references external script using native YAML !include directive
+# - External scripts are automatically loaded and Base64 encoded by SpotMan
+# - SSH configuration is automatically generated with correct key file paths
+# - Health check endpoint available at http://instance-ip/health
+# - Deployment logs available at /var/log/user-data.log on the instance
+#
+# YAML Include Features:
+# - Native YAML !include directive for external file inclusion
+# - Scripts are resolved relative to SpotMan root directory
+# - Supports both relative paths (scripts/) and absolute paths
+# - Cleaner syntax than manual @include processing
+# - Better integration with YAML parsing and validation
+#
+# Usage examples:
+#   ./spotman --region us-east-1 create --profile webserver --name web-east
+#   ./spotman --region eu-west-1 create --profile webserver --name web-eu
+#   ./spotman --region sa-east-1 create --profile webserver --name web-sa

@@ -1,0 +1,39 @@
+# Basic Spot Instance Profile
+# Clean, minimal spot instance for testing and batch workloads
+# Optimized for cost with no hibernation
+
+# Instance configuration
+instance_type: "m5.large"  # Reliable, cost-effective choice
+spot_instance: true  # Maximum cost savings
+hibernation_enabled: false  # Can be enabled on spot instances (AWS now supports this)
+
+# Storage configuration
+root_volume_size: 20  # GB - sufficient for most workloads
+root_volume_type: "gp3"  # Best price/performance ratio
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true  # Keep security patches current
+
+# Basic user data for essential setup
+user_data: !include scripts/spot-simple-setup.sh
+
+# Tags for basic spot instances
+tags:
+  ApplicationClass: "spot-test"
+  Environment: "test"
+  InstanceType: "spot"
+  Purpose: "testing-batch-workloads"
+  Owner: "spotman"
+  ManagedBy: "spotman"
+  
+# Notes:
+# - Basic spot instance with essential tools via external script
+# - Script located at scripts/spot-simple-setup.sh
+# - No hibernation (not supported on spot)
+# - Includes system monitoring utilities
+# - Run 'sysinfo' command for system details
+# - Ideal for batch processing and testing
+#
+# Usage:
+#   ./spotman --region sa-east-1 create --profile spot-simple --name batch01

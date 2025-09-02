@@ -1,0 +1,35 @@
+# Modular Web Server Profile
+# Demonstrates script inclusion pattern for SpotMan
+
+# Instance configuration
+instance_type: "t3.small"
+spot_instance: false
+hibernation_enabled: false
+
+# Storage configuration
+root_volume_size: 20
+root_volume_type: "gp3"
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true
+
+# Modular user data using external script
+user_data: !include scripts/modular-web-setup.sh
+
+# Tags
+tags:
+  ApplicationClass: "modular-web"
+  Environment: "production"
+  Architecture: "modular-scripts"
+  ManagedBy: "spotman"
+  
+# Notes:
+# - Demonstrates modular script architecture
+# - External script creates nested setup scripts
+# - Script located at scripts/modular-web-setup.sh
+# - Could be enhanced to download from S3/GitHub
+# - Modular, reusable architecture
+#
+# Usage:
+#   ./spotman --region sa-east-1 create --profile modular-web --name web-modular
