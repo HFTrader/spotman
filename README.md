@@ -35,6 +35,11 @@ Create an Ollama LLM server:
 ./spotman create --profile ollama-spot --name ollama01 --class ollama
 ```
 
+Create an on-demand hibernation instance:
+```bash
+./spotman create --profile hibernation-ondemand --name prod01 --class production
+```
+
 ## Features
 
 - **🤖 Ollama LLM Integration**: Dedicated profiles and management for Ollama language model servers
@@ -68,6 +73,53 @@ pip install -r requirements.txt
 ```bash
 chmod +x spotman
 ```
+
+## User Configuration Directory
+
+SpotMan supports user-defined profiles and scripts stored outside the git repository. This allows you to create custom configurations without modifying the main SpotMan codebase.
+
+### Directory Structure
+
+SpotMan automatically creates the following directory structure in your home directory:
+
+```
+~/.spotman/
+├── profiles/          # Your custom instance profiles
+├── scripts/           # Your custom setup scripts
+├── backups/           # SSH config backups
+├── ssh_config         # SpotMan's SSH configuration
+└── config.yaml        # SpotMan configuration
+```
+
+### Priority System
+
+When SpotMan looks for profiles, scripts, or configuration files, it follows this priority order:
+
+1. **User Config Directory First** (`~/.spotman/`) - Your custom files
+2. **Git Directory Fallback** - The original SpotMan files
+
+This means you can override any profile or script by creating a file with the same name in your user config directory.
+
+### Getting Started
+
+The first time you run SpotMan, it will automatically create the `~/.spotman/` directory structure with sample files:
+
+- `~/.spotman/profiles/example-profile.yaml` - Example profile to customize
+- `~/.spotman/scripts/example-setup.sh` - Example setup script to modify
+
+Simply copy these files and modify them for your needs:
+
+```bash
+cp ~/.spotman/profiles/example-profile.yaml ~/.spotman/profiles/my-profile.yaml
+cp ~/.spotman/scripts/example-setup.sh ~/.spotman/scripts/my-setup.sh
+```
+
+Then use your custom profiles:
+```bash
+./spotman create --profile my-profile --name myinstance
+```
+
+For detailed information, see `USER-CONFIG-README.md`.
 
 ## Usage
 
@@ -360,10 +412,10 @@ SpotMan now supports truly region-agnostic profiles using external region config
 
 ### External Region Configuration
 
-Region-specific settings (AMI IDs, key pairs, network settings) are stored in a separate `regions.yaml` file:
+Region-specific settings (AMI IDs, key pairs, network settings) are stored in a separate `regions.yaml` file in your user config directory (`~/.spotman/regions.yaml`):
 
 ```yaml
-# regions.yaml - External region configuration
+# ~/.spotman/regions.yaml - External region configuration
 regions:
   us-east-1:
     # ami_id: "ami-override123"  # Optional: override default AMI
@@ -418,7 +470,7 @@ tags:
 - **Smart Defaults**: Remembers last used region for convenience
 
 ### Setup Process
-1. **Configure regions.yaml**: Set up AMI IDs, key pairs, and network defaults for each region
+1. **Configure regions.yaml**: Set up AMI IDs, key pairs, and network defaults for each region in `~/.spotman/regions.yaml`
 2. **Create application profiles**: Focus only on application-specific configuration
 3. **Set default region**: `./spotman region set us-west-2` (optional)
 4. **Deploy anywhere**: Same profile works across all configured regions
