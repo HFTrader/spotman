@@ -1,0 +1,53 @@
+# Multi-Service Development Instance Profile
+# Example showing generic port forwarding configuration for multiple services
+
+# Instance configuration
+instance_type: "t3.medium"
+spot_instance: false  # On-demand for development reliability
+hibernation_enabled: false
+
+# Storage configuration
+root_volume_size: 20  # GB
+root_volume_type: "gp3"
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true
+
+# SSH port forwarding configuration - supports multiple services
+ssh_port_forwards:
+  - local_port: 3000      # React dev server
+    remote_port: 3000
+    remote_host: localhost
+  - local_port: 8080      # Backend API
+    remote_port: 8080
+    remote_host: localhost
+  - local_port: 5432      # PostgreSQL
+    remote_port: 5432
+    remote_host: localhost
+  - local_port: 6379      # Redis
+    remote_port: 6379
+    remote_host: localhost
+  - local_port: 9000      # Minio/S3
+    remote_port: 9000
+    remote_host: localhost
+
+# Development environment setup script
+user_data: !include scripts/dev-setup.sh
+
+# Tags for development instance
+tags:
+  ApplicationClass: "development"
+  Environment: "development"
+  Purpose: "multi-service-dev"
+  ManagedBy: "spotman"
+  
+# Usage:
+#   ./spotman create --profile dev-multi --name dev01 --class development
+# 
+# After creation, SSH will automatically forward:
+#   - localhost:3000 -> React dev server
+#   - localhost:8080 -> Backend API  
+#   - localhost:5432 -> PostgreSQL
+#   - localhost:6379 -> Redis
+#   - localhost:9000 -> Minio/S3

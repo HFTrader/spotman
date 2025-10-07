@@ -2,6 +2,22 @@
 
 **SpotMan** is a powerful, CLI-based AWS instance manager that simplifies deploying and managing EC2 instances across multiple regions. It supports both spot and on-demand instances, hibernation, and uses YAML profiles for configuration.
 
+## 🚀 New: Ollama Integration
+
+SpotMan now includes integrated support for Ollama LLM servers! Deploy and manage GPU-accelerated language models with ease:
+
+```bash
+# Create an Ollama instance with automatic setup
+./ollama-manager create --name ollama01
+
+# Connect with automatic SSH port forwarding
+./ollama-manager connect ollama01
+
+# Access Ollama API at http://localhost:11434
+```
+
+See [OLLAMA_INTEGRATION.md](OLLAMA_INTEGRATION.md) for complete documentation.
+
 ## Quick Start
 
 Create an instance from a YAML profile:
@@ -14,18 +30,15 @@ Create a hibernation-enabled spot instance:
 ./spotman create --profile spot-hibernation --name spot01 --class development
 ```
 
-Create an on-demand hibernation instance:
+Create an Ollama LLM server:
 ```bash
-./spotman create --profile hibernation-ondemand --name prod01 --class production
+./spotman create --profile ollama-spot --name ollama01 --class ollama
 ```
-
-Create an on-demand hibernation instance:
-```bash
-./spotman create --profile hibernation-ondemand --name prod01 --class production
-```sive Python script for managing AWS EC2 instances with hibernation support, spot instances, and modular YAML configuration.
 
 ## Features
 
+- **🤖 Ollama LLM Integration**: Dedicated profiles and management for Ollama language model servers
+- **🔌 Generic SSH Port Forwarding**: Configure port forwarding in profiles for any application
 - **Native YAML Includes**: Modular profiles using `!include` directives for external scripts
 - **Hibernation Support**: Full hibernation capability for both on-demand and spot instances
 - **Spot Instance Integration**: Cost-optimized spot instances with hibernation support
@@ -234,6 +247,51 @@ tags:
   Environment: "production"
   InstanceType: "on-demand"
   HibernationEnabled: "true"
+```
+
+### SSH Port Forwarding Configuration
+
+SpotMan supports automatic SSH port forwarding configuration in profiles. Define port forwards in your profile and they'll be automatically added to SSH config:
+
+```yaml
+# profiles/dev-server.yaml
+instance_type: "t3.medium"
+spot_instance: false
+
+# SSH port forwarding configuration
+ssh_port_forwards:
+  - local_port: 3000      # React dev server
+    remote_port: 3000
+    remote_host: localhost
+  - local_port: 8080      # Backend API
+    remote_port: 8080
+    remote_host: localhost
+  - local_port: 5432      # PostgreSQL
+    remote_port: 5432
+    remote_host: localhost
+
+user_data: !include scripts/dev-setup.sh
+
+tags:
+  ApplicationClass: "development"
+  Purpose: "multi-service-dev"
+```
+
+**Port Forward Options:**
+- `local_port`: Port on your local machine (required)
+- `remote_port`: Port on the instance (defaults to local_port)
+- `remote_host`: Host on the instance (defaults to localhost)
+
+**Generated SSH Config:**
+```ssh
+Host dev-server-01
+    HostName 1.2.3.4
+    User ubuntu
+    IdentityFile ~/.ssh/key.pem
+    StrictHostKeyChecking no
+    LocalForward 3000 localhost:3000
+    LocalForward 8080 localhost:8080
+    LocalForward 5432 localhost:5432
 ```
 
 ## Profile Options

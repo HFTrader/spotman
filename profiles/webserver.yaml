@@ -15,6 +15,12 @@ root_volume_type: "gp3"  # Latest generation EBS for better performance
 os_type: "ubuntu"
 update_os: true  # Automatically update the OS during bootstrap
 
+# SSH port forwarding configuration for web development
+ssh_port_forwards:
+  - local_port: 8080      # Local port to access web server
+    remote_port: 80       # Remote nginx port
+    remote_host: localhost
+
 # User data script - references external script file using native YAML include
 user_data: !include scripts/webserver-setup.sh
 

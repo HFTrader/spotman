@@ -535,14 +535,41 @@ class AWSInstanceManager:
                 else:
                     print(f"Warning: SSH key '{key_name}' not found in regions configuration. Using default.")
             
-            # Create SSH config entry with comment
+            # Get port forwarding configuration from profile if available
+            port_forward_config = ""
+            try:
+                # Try to get the profile used to create this instance
+                tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                profile_name = tags.get('Profile')  # We'll need to add this tag during creation
+                
+                if profile_name:
+                    try:
+                        profile = self.load_profile(profile_name)
+                        port_forwards = profile.get('ssh_port_forwards', [])
+                        
+                        if port_forwards:
+                            forwards = []
+                            for forward in port_forwards:
+                                local_port = forward.get('local_port')
+                                remote_port = forward.get('remote_port', local_port)
+                                remote_host = forward.get('remote_host', 'localhost')
+                                forwards.append(f"    LocalForward {local_port} {remote_host}:{remote_port}")
+                                print(f"Added port forwarding: Local port {local_port} -> Remote {remote_host}:{remote_port}")
+                            
+                            if forwards:
+                                port_forward_config = "\n" + "\n".join(forwards)
+                    except:
+                        pass  # Profile not found or error loading, skip port forwarding
+            except:
+                pass  # No tags or error, skip port forwarding
+            
             ssh_entry = f"""
 # SpotMan managed entry for {host_name} ({instance_id})
 Host {host_name}
     HostName {public_ip}
     User ubuntu
     IdentityFile {identity_file}
-    StrictHostKeyChecking no
+    StrictHostKeyChecking no{port_forward_config}
 """
             
             # Read existing config or create new
@@ -641,9 +668,10 @@ Host {host_name}
             print("Please choose a different instance name or remove the existing SSH config entry.")
             sys.exit(1)
         
-        # Add creation timestamp
+        # Add creation timestamp and metadata
         tags['CreatedBy'] = 'spotman'
         tags['CreatedAt'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        tags['Profile'] = profile_name  # Track which profile was used
         if spot_instance:
             tags['InstanceType'] = 'spot'
         if hibernation_enabled:
@@ -955,12 +983,35 @@ yum update -y
 
             host_name = instance['Name'] if instance['Name'] != 'N/A' else instance['InstanceId']
             
-            # Get the instance's key name for proper SSH key lookup
+            # Get the instance's key name and tags for proper SSH key lookup and port forwarding
             identity_file = "~/.ssh/your-key.pem"  # Default fallback
+            port_forward_config = ""
             try:
                 response = self.ec2_client.describe_instances(InstanceIds=[instance['InstanceId']])
                 instance_details = response['Reservations'][0]['Instances'][0]
                 key_name = instance_details.get('KeyName')
+                
+                # Get port forwarding configuration from profile if available
+                tags = {tag['Key']: tag['Value'] for tag in instance_details.get('Tags', [])}
+                profile_name = tags.get('Profile')
+                
+                if profile_name:
+                    try:
+                        profile = self.load_profile(profile_name)
+                        port_forwards = profile.get('ssh_port_forwards', [])
+                        
+                        if port_forwards:
+                            forwards = []
+                            for forward in port_forwards:
+                                local_port = forward.get('local_port')
+                                remote_port = forward.get('remote_port', local_port)
+                                remote_host = forward.get('remote_host', 'localhost')
+                                forwards.append(f"    LocalForward {local_port} {remote_host}:{remote_port}")
+                            
+                            if forwards:
+                                port_forward_config = "\n" + "\n".join(forwards)
+                    except:
+                        pass  # Profile not found or error loading, skip port forwarding
                 
                 if key_name and self.regions_config and 'ssh_keys' in self.regions_config:
                     ssh_keys = self.regions_config['ssh_keys']
@@ -969,15 +1020,15 @@ yum update -y
                     else:
                         print(f"Warning: SSH key '{key_name}' not found in regions configuration for {host_name}. Using default.")
             except ClientError as e:
-                print(f"Warning: Could not get key name for instance {instance['InstanceId']}: {e}")
+                print(f"Warning: Could not get details for instance {instance['InstanceId']}: {e}")
             
-            # Create SSH config entry
+            # Create SSH config entry with optional port forwarding
             ssh_entry = f"""
 Host {host_name}
     HostName {instance['PublicIpAddress']}
     User ubuntu
     IdentityFile {identity_file}
-    StrictHostKeyChecking no
+    StrictHostKeyChecking no{port_forward_config}
 """
             
             # Remove existing entry for this host if it exists
