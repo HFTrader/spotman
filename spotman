@@ -2,1730 +2,16 @@
 """
 SpotMan - AWS EC2 Instance Manager
 A comprehensive tool for managing AWS EC2 instances with application class tagging.
+Frontend script that uses the SpotMan core library.
 """
 
 import argparse
-import json
-import os
 import sys
 import time
-import yaml
-import shutil
-from typing import Dict, List, Optional, Any
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnectionError, ConnectTimeoutError
-import subprocess
-import base64
-import urllib.request
-import re
-from functools import wraps
+from typing import Dict, List
 
-
-class AWSErrorHandler:
-    """Centralized AWS error handling utilities."""
-    
-    # AWS error codes that indicate transient issues (should be retried)
-    RETRYABLE_ERRORS = {
-        'Throttling',
-        'RequestLimitExceeded',
-        'ServiceUnavailable',
-        'InternalServerError',
-        'SlowDown',
-        'TooManyRequests'
-    }
-    
-    # AWS error codes that indicate authentication/authorization issues
-    AUTH_ERRORS = {
-        'UnauthorizedOperation',
-        'AccessDenied',
-        'InvalidClientTokenId',
-        'ExpiredToken',
-        'SignatureDoesNotMatch'
-    }
-    
-    # AWS error codes that indicate resource not found
-    NOT_FOUND_ERRORS = {
-        'InvalidInstanceId.NotFound',
-        'InvalidSpotInstanceRequestId.NotFound',
-        'InvalidVolume.NotFound',
-        'InvalidSnapshot.NotFound'
-    }
-    
-    @staticmethod
-    def is_retryable_error(error_code: str) -> bool:
-        """Check if an AWS error code indicates a retryable error."""
-        return error_code in AWSErrorHandler.RETRYABLE_ERRORS
-    
-    @staticmethod
-    def is_auth_error(error_code: str) -> bool:
-        """Check if an AWS error code indicates an authentication/authorization error."""
-        return error_code in AWSErrorHandler.AUTH_ERRORS
-    
-    @staticmethod
-    def is_not_found_error(error_code: str) -> bool:
-        """Check if an AWS error code indicates a resource not found error."""
-        return error_code in AWSErrorHandler.NOT_FOUND_ERRORS
-    
-    @staticmethod
-    def get_error_category(error: ClientError) -> str:
-        """Categorize an AWS error for better handling."""
-        error_code = error.response['Error']['Code']
-        
-        if AWSErrorHandler.is_auth_error(error_code):
-            return 'auth'
-        elif AWSErrorHandler.is_not_found_error(error_code):
-            return 'not_found'
-        elif AWSErrorHandler.is_retryable_error(error_code):
-            return 'retryable'
-        else:
-            return 'other'
-    
-    @staticmethod
-    def format_error_message(error: ClientError, operation: str = "AWS operation") -> str:
-        """Format a user-friendly error message from an AWS ClientError."""
-        error_code = error.response['Error']['Code']
-        error_message = error.response['Error']['Message']
-        
-        category = AWSErrorHandler.get_error_category(error)
-        
-        if category == 'auth':
-            return f"Authentication/Authorization error during {operation}: {error_message} (Code: {error_code})"
-        elif category == 'not_found':
-            return f"Resource not found during {operation}: {error_message} (Code: {error_code})"
-        elif category == 'retryable':
-            return f"Temporary AWS service issue during {operation}: {error_message} (Code: {error_code}). This may resolve automatically."
-        else:
-            return f"AWS error during {operation}: {error_message} (Code: {error_code})"
-
-
-def aws_retry(max_attempts: int = 3, backoff_factor: float = 1.5, operation_name: str = "AWS operation"):
-    """Decorator to retry AWS operations on transient errors."""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_error = None
-            
-            for attempt in range(max_attempts):
-                try:
-                    return func(*args, **kwargs)
-                except ClientError as e:
-                    error_code = e.response['Error']['Code']
-                    last_error = e
-                    
-                    if AWSErrorHandler.is_retryable_error(error_code) and attempt < max_attempts - 1:
-                        wait_time = backoff_factor ** attempt
-                        print(f"⚠️  {operation_name} failed (attempt {attempt + 1}/{max_attempts}): {error_code}")
-                        print(f"   Retrying in {wait_time:.1f} seconds...")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        # Not retryable or last attempt
-                        raise e
-                except (EndpointConnectionError, ConnectTimeoutError) as e:
-                    last_error = e
-                    if attempt < max_attempts - 1:
-                        wait_time = backoff_factor ** attempt
-                        print(f"⚠️  Connection error during {operation_name} (attempt {attempt + 1}/{max_attempts})")
-                        print(f"   Retrying in {wait_time:.1f} seconds...")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        raise e
-            
-            # If we get here, all retries failed
-            raise last_error
-        
-        return wrapper
-    return decorator
-
-
-class IncludeLoader(yaml.SafeLoader):
-    """Custom YAML loader that supports !include directives."""
-    
-    def __init__(self, stream):
-        # Set root to the parent directory of the profile (SpotMan directory)
-        self._root = os.path.dirname(os.path.dirname(stream.name))
-        super().__init__(stream)
-
-    def include(self, node):
-        """Include file referenced in !include directive."""
-        filename = self.construct_scalar(node)
-        
-        # Get user config directory
-        user_config_dir = os.path.expanduser('~/.spotman')
-        user_scripts_dir = os.path.join(user_config_dir, 'scripts')
-        
-        # Handle relative paths - check user config directory first, then git directory
-        if not os.path.isabs(filename):
-            # Check if filename contains a directory path (e.g., "scripts/myscript.sh")
-            if '/' in filename:
-                # Split filename into directory and basename
-                file_dir, file_basename = os.path.split(filename)
-                # Try user config subdirectory first
-                user_script_path = os.path.join(user_config_dir, file_dir, file_basename)
-                if os.path.exists(user_script_path):
-                    script_path = user_script_path
-                    print(f"Loaded external script from user config: {os.path.relpath(script_path, user_config_dir)}")
-                else:
-                    # Fallback to git directory
-                    git_script_path = os.path.join(self._root, filename)
-                    if os.path.exists(git_script_path):
-                        script_path = git_script_path
-                        print(f"Loaded external script from git directory: {os.path.relpath(script_path, self._root)}")
-                    else:
-                        script_path = None
-            else:
-                # No directory in filename, check both locations
-                user_script_path = os.path.join(user_scripts_dir, filename)
-                if os.path.exists(user_script_path):
-                    script_path = user_script_path
-                    print(f"Loaded external script from user config: {os.path.relpath(script_path, user_config_dir)}")
-                else:
-                    git_script_path = os.path.join(self._root, 'scripts', filename)
-                    if os.path.exists(git_script_path):
-                        script_path = git_script_path
-                        print(f"Loaded external script from git directory: {os.path.relpath(script_path, self._root)}")
-                    else:
-                        script_path = None
-        else:
-            # Absolute path
-            script_path = filename
-        
-        if not script_path or not os.path.exists(script_path):
-            print(f"Error: Include file '{filename}' not found")
-            
-            # List available scripts from both locations
-            available_scripts = []
-            
-            # Check user config scripts
-            if os.path.exists(user_scripts_dir):
-                user_scripts = [f for f in os.listdir(user_scripts_dir) if f.endswith('.sh')]
-                if user_scripts:
-                    available_scripts.extend([f"~/.spotman/scripts/{s}" for s in user_scripts])
-            
-            # Check git scripts
-            git_scripts_dir = os.path.join(self._root, 'scripts')
-            if os.path.exists(git_scripts_dir):
-                git_scripts = [f for f in os.listdir(git_scripts_dir) if f.endswith('.sh')]
-                if git_scripts:
-                    available_scripts.extend([f"git/scripts/{s}" for s in git_scripts])
-            
-            if available_scripts:
-                print("Available scripts:")
-                for script in available_scripts:
-                    print(f"  {script}")
-            sys.exit(1)
-        
-        try:
-            with open(script_path, 'r') as f:
-                content = f.read()
-                return content
-        except Exception as e:
-            print(f"Error reading include file '{script_path}': {e}")
-            sys.exit(1)
-
-
-# Add the include constructor to the custom loader
-IncludeLoader.add_constructor('!include', IncludeLoader.include)
-
-
-class AWSInstanceManager:
-    """Manages AWS EC2 instances with application class tagging."""
-    
-    def __init__(self, region: str = None, profile: str = None):
-        """Initialize the AWS session and EC2 client."""
-        try:
-            # Track if region was explicitly provided
-            self.region_explicit = region is not None
-            
-            # Get region: command line > last used > AWS session default
-            self.region = region or self._get_last_used_region()
-            
-            # If no region was explicitly provided, try to get from session
-            if not self.region:
-                # Create a temporary session to check for default region
-                temp_session = boto3.Session(profile_name=profile)
-                if temp_session.region_name:
-                    self.region = temp_session.region_name
-                    print(f"Using AWS default region: {self.region}")
-            
-            # Require region specification if none was found
-            if not self.region:
-                print("Error: No region specified and no default region found.")
-                print("Please specify a region using --region or set a default region with 'spotman region set <region>'.")
-                print("Available regions can be listed with: spotman region list")
-                sys.exit(1)
-            
-            session = boto3.Session(profile_name=profile, region_name=self.region)
-            self.ec2_client = session.client('ec2')
-            self.ec2_resource = session.resource('ec2')
-            
-            # Save the region as last used when explicitly provided via --region
-            if self.region_explicit:
-                self._save_last_used_region(self.region)
-            # Also save as last used if no explicit region but we got one from session/default
-            elif not self.region_explicit and self.region:
-                self._save_last_used_region(self.region)
-            
-            # Load region configuration
-            self.regions_config = self._load_regions_config()
-            
-            # Initialize user config directories
-            self._initialize_user_config_dirs()
-            
-        except NoCredentialsError:
-            print("❌ AWS credentials not found or invalid.")
-            print("Please configure your AWS credentials using one of these methods:")
-            print("  1. AWS CLI: aws configure")
-            print("  2. Environment variables: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
-            print("  3. AWS profile: aws configure --profile <profile-name>")
-            print("  4. IAM roles (if running on EC2)")
-            sys.exit(1)
-            
-        except ClientError as e:
-            error_msg = AWSErrorHandler.format_error_message(e, "AWS session initialization")
-            print(f"❌ {error_msg}")
-            if AWSErrorHandler.is_auth_error(e.response['Error']['Code']):
-                print("💡 Check your AWS credentials and permissions.")
-            sys.exit(1)
-            
-        except (EndpointConnectionError, ConnectTimeoutError) as e:
-            print(f"❌ Cannot connect to AWS: {e}")
-            print("💡 Check your internet connection and AWS service status.")
-            sys.exit(1)
-            
-        except Exception as e:
-            print(f"❌ Unexpected error initializing AWS session: {e}")
-            print("💡 This may be a configuration issue. Check your AWS setup.")
-            sys.exit(1)
-
-    def load_profile(self, profile_name: str) -> Dict[str, Any]:
-        """Load instance profile from YAML file with native !include support."""
-        # Check user config directory first, then fallback to git directory
-        user_config_dir = self._get_config_dir()
-        user_profiles_dir = os.path.join(user_config_dir, 'profiles')
-        git_profiles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'profiles')
-        
-        # Try user config directory first
-        user_profile_path = os.path.join(user_profiles_dir, f'{profile_name}.yaml')
-        if os.path.exists(user_profile_path):
-            profile_path = user_profile_path
-            print(f"Using profile from user config: {os.path.relpath(profile_path, user_config_dir)}")
-        else:
-            # Fallback to git directory
-            profile_path = os.path.join(git_profiles_dir, f'{profile_name}.yaml')
-            if os.path.exists(profile_path):
-                print(f"Using profile from git directory: {os.path.relpath(profile_path, os.path.dirname(os.path.abspath(__file__)))}")
-            else:
-                profile_path = None
-        
-        if not profile_path:
-            print(f"Error: Profile '{profile_name}' not found.")
-            
-            # List available profiles from both locations
-            available_profiles = []
-            
-            # Check user config profiles
-            if os.path.exists(user_profiles_dir):
-                user_profiles = [f[:-5] for f in os.listdir(user_profiles_dir) if f.endswith('.yaml')]
-                if user_profiles:
-                    available_profiles.extend([f"~/.spotman/profiles/{p}" for p in user_profiles])
-            
-            # Check git profiles
-            if os.path.exists(git_profiles_dir):
-                git_profiles = [f[:-5] for f in os.listdir(git_profiles_dir) if f.endswith('.yaml')]
-                if git_profiles:
-                    available_profiles.extend([f"git/profiles/{p}" for p in git_profiles])
-            
-            if available_profiles:
-                print("Available profiles:")
-                for profile in available_profiles:
-                    print(f"  {profile}")
-            sys.exit(1)
-        
-        try:
-            with open(profile_path, 'r') as f:
-                profile = yaml.load(f, Loader=IncludeLoader)
-            
-            return profile
-        except yaml.YAMLError as e:
-            print(f"Error parsing YAML profile: {e}")
-            sys.exit(1)
-
-    def _load_regions_config(self) -> Dict[str, Any]:
-        """Load region configuration from regions.yaml file."""
-        # Check user config directory first, then fallback to git directory
-        user_config_dir = self._get_config_dir()
-        user_regions_file = os.path.join(user_config_dir, 'regions.yaml')
-        git_regions_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'regions.yaml')
-        
-        # Try user config directory first
-        if os.path.exists(user_regions_file):
-            regions_file = user_regions_file
-            print(f"Using regions config from user directory: {os.path.relpath(regions_file, user_config_dir)}")
-        else:
-            # Check if git directory has regions.yaml
-            if os.path.exists(git_regions_file):
-                # Copy from git directory to user directory
-                print("Found regions.yaml in git directory, copying to user config directory...")
-                try:
-                    shutil.copy2(git_regions_file, user_regions_file)
-                    regions_file = user_regions_file
-                    print(f"✅ Copied regions.yaml to user config directory: {os.path.relpath(regions_file, user_config_dir)}")
-                except Exception as e:
-                    print(f"⚠️  Warning: Could not copy regions.yaml to user directory: {e}")
-                    regions_file = git_regions_file
-                    print(f"Using regions config from git directory: {os.path.relpath(regions_file, os.path.dirname(os.path.abspath(__file__)))}")
-            else:
-                # No regions.yaml found anywhere, create a sample one in user directory
-                print("No regions.yaml found. Creating sample regions.yaml in user config directory...")
-                self._create_sample_regions_config(user_regions_file)
-                regions_file = user_regions_file
-        
-        if not regions_file or not os.path.exists(regions_file):
-            print(f"Warning: Regions configuration file 'regions.yaml' not found in user config (~/.spotman/) or git directory.")
-            print("Using legacy profile format or create regions.yaml for region-agnostic profiles.")
-            return {}
-        
-        try:
-            with open(regions_file, 'r') as f:
-                return yaml.safe_load(f)
-        except yaml.YAMLError as e:
-            print(f"Error parsing regions configuration: {e}")
-            sys.exit(1)
-
-    @aws_retry(max_attempts=3, operation_name="hibernation families fetch")
-    def get_hibernation_families(self) -> List[str]:
-        """Fetch hibernation-compatible instance families using AWS API."""
-        if not hasattr(self, '_hibernation_families'):
-            try:
-                # Get all instance types with hibernation support information
-                response = self.ec2_client.describe_instance_types()
-                hibernation_families = set()
-                
-                # Extract families that support hibernation
-                for instance_type in response['InstanceTypes']:
-                    if instance_type.get('HibernationSupported', False):
-                        family = instance_type['InstanceType'].split('.')[0]
-                        hibernation_families.add(family)
-                
-                self._hibernation_families = sorted(list(hibernation_families))
-                
-                print(f"✅ Found {len(self._hibernation_families)} hibernation-compatible families from AWS API: {self._hibernation_families}")
-                
-            except ClientError as e:
-                error_msg = AWSErrorHandler.format_error_message(e, "hibernation families lookup")
-                print(f"⚠️  {error_msg}")
-                print("   Falling back to known hibernation-compatible families...")
-                
-                # Fallback to known hibernation-compatible families
-                self._hibernation_families = ['c3', 'c4', 'c5', 'c5a', 'c5ad', 'c5d', 'c5n',
-                                             'm3', 'm4', 'm5', 'm5a', 'm5ad', 'm5d', 'm5dn', 'm5n', 'm5zn',
-                                             'r3', 'r4', 'r5', 'r5a', 'r5ad', 'r5b', 'r5d', 'r5dn', 'r5n']
-                print(f"   Using fallback list: {self._hibernation_families}")
-    
-        return self._hibernation_families
-
-    def _get_config_dir(self) -> str:
-        """Get the SpotMan configuration directory."""
-        config_dir = os.path.expanduser('~/.spotman')
-        if not os.path.exists(config_dir):
-            os.makedirs(config_dir)
-        return config_dir
-
-    def _initialize_user_config_dirs(self) -> None:
-        """Initialize user configuration directories for profiles and scripts."""
-        config_dir = self._get_config_dir()
-        
-        # Create profiles directory and sample profile
-        profiles_dir = os.path.join(config_dir, 'profiles')
-        if not os.path.exists(profiles_dir):
-            os.makedirs(profiles_dir)
-            self._create_sample_profile(profiles_dir)
-            print(f"✅ Created user profiles directory: {profiles_dir}")
-            print("   You can now create custom profiles in ~/.spotman/profiles/")
-        
-        # Create scripts directory and sample script
-        scripts_dir = os.path.join(config_dir, 'scripts')
-        if not os.path.exists(scripts_dir):
-            os.makedirs(scripts_dir)
-            self._create_sample_script(scripts_dir)
-            print(f"✅ Created user scripts directory: {scripts_dir}")
-            print("   You can now create custom scripts in ~/.spotman/scripts/")
-        
-        # Create regions.yaml if it doesn't exist
-        regions_file = os.path.join(config_dir, 'regions.yaml')
-        if not os.path.exists(regions_file):
-            self._create_sample_regions_config(regions_file)
-            print(f"✅ Created sample regions.yaml: {regions_file}")
-            print("   ⚠️  Please customize this file with your actual AWS resources!")
-
-    def _create_sample_profile(self, profiles_dir: str) -> None:
-        """Create a sample profile in the user profiles directory."""
-        sample_profile_path = os.path.join(profiles_dir, 'sample-profile.yaml')
-        
-        sample_profile_content = """# Sample User Profile - Getting Started
-# This is a sample profile created automatically for you.
-# Modify this file to create your own custom instance configurations.
-
-# Instance configuration
-instance_type: "t3.micro"  # Cost-effective general purpose instance
-spot_instance: false  # Use on-demand for reliability
-hibernation_enabled: false  # Standard instance without hibernation
-
-# Storage configuration
-root_volume_size: 20  # GB - sufficient for most workloads
-root_volume_type: "gp3"  # Fast, cost-effective storage
-
-# Operating system configuration
-os_type: "ubuntu"
-update_os: true  # Keep system current
-
-# User data script (uncomment and modify path as needed)
-# user_data: !include scripts/sample-setup.sh
-
-# Tags for sample instances
-tags:
-  ApplicationClass: "sample"
-  Environment: "development"
-  InstanceType: "on-demand"
-  Purpose: "sample-workload"
-  ManagedBy: "spotman"
-  Owner: "user"
-
-# Notes:
-# - This is a basic sample profile to get you started
-# - Modify the instance_type, storage, and other settings as needed
-# - Uncomment the user_data line and create a setup script if desired
-# - Add your own tags and configuration options
-#
-# Usage:
-#   ./spotman create --profile sample-profile --name my-sample-instance
-#
-# To create your own profile:
-#   cp ~/.spotman/profiles/sample-profile.yaml ~/.spotman/profiles/my-profile.yaml
-#   # Then edit my-profile.yaml with your desired configuration
-"""
-        
-        try:
-            with open(sample_profile_path, 'w') as f:
-                f.write(sample_profile_content)
-            print(f"   📄 Created sample profile: {sample_profile_path}")
-        except Exception as e:
-            print(f"   ⚠️  Warning: Could not create sample profile: {e}")
-
-    def _create_sample_script(self, scripts_dir: str) -> None:
-        """Create a sample script in the user scripts directory."""
-        sample_script_path = os.path.join(scripts_dir, 'sample-setup.sh')
-        
-        sample_script_content = """#!/bin/bash
-set -e
-
-# Sample User Setup Script
-# This is a sample setup script created automatically for you.
-# Modify this file to install your preferred tools and configurations.
-
-# AWS Instance Metadata Service endpoint
-AWS_METADATA_SERVER="http://169.254.169.254"
-
-# Logging
-exec > >(tee /var/log/user-data.log) 2>&1
-echo "Sample user setup started at $(date)"
-
-# Get instance metadata
-INSTANCE_ID=$(curl -s $AWS_METADATA_SERVER/latest/meta-data/instance-id)
-REGION=$(curl -s $AWS_METADATA_SERVER/latest/meta-data/placement/region)
-
-echo "Instance: $INSTANCE_ID in region: $REGION"
-
-# System updates
-echo "Updating system packages..."
-apt-get update && apt-get upgrade -y
-
-# Install your preferred development tools
-echo "Installing sample development tools..."
-apt-get install -y \\
-  htop \\
-  curl wget \\
-  git \\
-  vim nano \\
-  python3-pip \\
-  build-essential
-
-# Configure git (customize as needed)
-git config --system init.defaultBranch main
-git config --system user.name "SpotMan User"
-git config --system user.email "user@spotman.local"
-
-# Create workspace directories
-mkdir -p /home/ubuntu/projects
-chown ubuntu:ubuntu /home/ubuntu/projects
-
-# Create a simple info script
-cat > /home/ubuntu/instance-info.sh << 'EOF'
-#!/bin/bash
-
-# AWS Instance Metadata Service endpoint
-AWS_METADATA_SERVER="http://169.254.169.254"
-
-echo "=== Sample Instance Info ==="
-echo "Instance ID: $(curl -s $AWS_METADATA_SERVER/latest/meta-data/instance-id)"
-echo "Region: $(curl -s $AWS_METADATA_SERVER/latest/meta-data/placement/region)"
-echo "Instance Type: $(curl -s $AWS_METADATA_SERVER/latest/meta-data/instance-type)"
-echo "Setup: Sample configuration"
-echo "Uptime: $(uptime)"
-echo ""
-echo "Directories:"
-echo "  ~/projects - Your workspace"
-echo ""
-echo "Next steps:"
-echo "1. Customize this setup script for your needs"
-echo "2. Add your preferred tools and configurations"
-echo "3. Test with: ./instance-info.sh"
-EOF
-chmod +x /home/ubuntu/instance-info.sh
-chown ubuntu:ubuntu /home/ubuntu/instance-info.sh
-
-# Mark setup completion
-echo "$(date)" > /tmp/sample-setup-complete
-touch /tmp/sample-setup-complete
-
-echo "Sample setup completed successfully at $(date)"
-echo ""
-echo "To customize this setup:"
-echo "1. Edit ~/.spotman/scripts/sample-setup.sh"
-echo "2. Add your preferred tools and configurations"
-echo "3. Test your changes on a new instance"
-"""
-
-        try:
-            with open(sample_script_path, 'w') as f:
-                f.write(sample_script_content)
-            # Make the script executable
-            os.chmod(sample_script_path, 0o755)
-            print(f"   📄 Created sample script: {sample_script_path}")
-        except Exception as e:
-            print(f"   ⚠️  Warning: Could not create sample script: {e}")
-
-    def _create_sample_regions_config(self, regions_file_path: str) -> None:
-        """Create a sample regions.yaml file in the user config directory."""
-        sample_regions_content = """# SpotMan Region Configuration
-# This file contains region-specific settings that are used by all profiles
-# Customize this file with your AWS regions, AMI IDs, key pairs, and network settings
-
-# SSH Key Mappings - Maps AWS key pair names to local private key file paths
-ssh_keys:
-  my-keypair-us-east: "~/.ssh/my-keypair-us-east.pem"
-  my-keypair-us-west: "~/.ssh/my-keypair-us-west.pem"
-
-regions:
-  us-east-1:
-    # ami_id: "ami-12345678"  # Uncomment and replace with your preferred AMI
-    key_name: "my-keypair-us-east"
-    default_security_group_ids:
-      - "sg-0123456789abcdef0"  # Replace with your actual security group ID
-    default_subnet_id: "subnet-0123456789abcdef0"  # Replace with your actual subnet ID
-
-  us-west-2:
-    # ami_id: "ami-87654321"  # Uncomment and replace with your preferred AMI
-    key_name: "my-keypair-us-west"
-    default_security_group_ids:
-      - "sg-fedcba9876543210"  # Replace with your actual security group ID
-    default_subnet_id: "subnet-fedcba9876543210"  # Replace with your actual subnet ID
-
-# Default configuration applied when region-specific values are not found
-defaults:
-  instance_type: "t3.micro"
-  os_type: "ubuntu"
-  update_os: true
-  # ami_id: "ami-default123"  # Uncomment to set a global default AMI
-  spot_instance: false  # Set to true to use spot instances by default
-  hibernation_enabled: false  # Set to true to enable hibernation by default
-  root_volume_size: 20  # Root volume size in GB
-  root_volume_type: "gp3"  # EBS volume type (gp2, gp3, io1, io2)
-
-# Configuration Notes:
-# - Update the ssh_keys section with your actual key pair names and file paths
-# - Replace the security group IDs and subnet IDs with your actual AWS resources
-# - Uncomment and customize AMI IDs for specific regions or set a global default
-# - Add additional regions as needed following the same format
-# - This file is stored in ~/.spotman/regions.yaml and is specific to your user
-"""
-
-        try:
-            with open(regions_file_path, 'w') as f:
-                f.write(sample_regions_content)
-            print(f"   📄 Created sample regions.yaml: {regions_file_path}")
-            print("   ⚠️  Please customize this file with your actual AWS resources!")
-        except Exception as e:
-            print(f"   ⚠️  Warning: Could not create sample regions.yaml: {e}")
-
-    def _get_last_used_region(self) -> Optional[str]:
-        """Get the last used region from configuration."""
-        config_file = os.path.join(self._get_config_dir(), 'config.yaml')
-        try:
-            with open(config_file, 'r') as f:
-                config = yaml.safe_load(f)
-                last_region = config.get('last_used_region')
-                if last_region:
-                    print(f"Using last used region: {last_region}")
-                return last_region
-        except (FileNotFoundError, yaml.YAMLError):
-            return None
-
-    def _save_last_used_region(self, region: str) -> None:
-        """Save the last used region to configuration."""
-        config_dir = self._get_config_dir()
-        config_file = os.path.join(config_dir, 'config.yaml')
-        
-        # Load existing config or create new
-        config = {}
-        try:
-            with open(config_file, 'r') as f:
-                config = yaml.safe_load(f) or {}
-        except (FileNotFoundError, yaml.YAMLError):
-            pass
-        
-        # Update last used region
-        config['last_used_region'] = region
-        
-        # Save config
-        try:
-            with open(config_file, 'w') as f:
-                yaml.dump(config, f, default_flow_style=False)
-        except Exception as e:
-            # Don't fail if we can't save config, just warn
-            print(f"Warning: Could not save last used region: {e}")
-
-    def get_current_region(self) -> str:
-        """Get the current region being used."""
-        return self.region
-
-    def set_default_region(self, region: str) -> bool:
-        """Set the default region for future operations."""
-        # Validate that the region exists in our configuration
-        if self.regions_config and 'regions' in self.regions_config:
-            if region not in self.regions_config['regions']:
-                available_regions = list(self.regions_config['regions'].keys())
-                print(f"Error: Region '{region}' not configured.")
-                print(f"Available regions: {available_regions}")
-                return False
-        
-        self._save_last_used_region(region)
-        print(f"Default region set to: {region}")
-        return True
-
-    @aws_retry(max_attempts=3, operation_name="instance hibernation")
-    def hibernate_instance(self, instance_identifier: str) -> bool:
-        """Hibernate an EC2 instance by ID or name."""
-        # Resolve instance name to ID if needed
-        instance_id = self._resolve_instance_identifier(instance_identifier)
-        if not instance_id:
-            return False
-        
-        try:
-            # Check if hibernation is configured and instance is running
-            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-            instance = response['Reservations'][0]['Instances'][0]
-            current_state = instance['State']['Name']
-            hibernation_configured = instance.get('HibernationOptions', {}).get('Configured', False)
-            
-            if current_state != 'running':
-                print(f"❌ Instance {instance_id} is in '{current_state}' state. Can only hibernate running instances.")
-                return False
-                
-            if not hibernation_configured:
-                print(f"⚠️  Instance {instance_id} was not configured for hibernation at launch.")
-                print("Proceeding with regular stop instead of hibernation...")
-                self.ec2_client.stop_instances(InstanceIds=[instance_id])
-            else:
-                print(f"Hibernating instance {instance_id}...")
-                print("💾 Saving memory state to disk - this may take a few minutes...")
-                self.ec2_client.stop_instances(
-                    InstanceIds=[instance_id],
-                    Hibernate=True
-                )
-            
-            print(f"✅ Hibernation initiated for instance {instance_id}")
-            print("Note: Instance will enter 'stopped' state when hibernation completes.")
-            print("Use 'spotman hibernate resume <instance>' to restore the hibernated state.")
-            return True
-            
-        except ClientError as e:
-            error_msg = AWSErrorHandler.format_error_message(e, f"hibernating instance {instance_id}")
-            print(f"❌ {error_msg}")
-            
-            error_code = e.response['Error']['Code']
-            if error_code == 'InvalidInstanceId.NotFound':
-                print("💡 The specified instance was not found.")
-            elif error_code == 'IncorrectInstanceState':
-                print("💡 The instance is not in a running state.")
-            elif "does not support hibernation" in str(e):
-                print("💡 This instance type or configuration doesn't support hibernation.")
-                print("   Try using a hibernation-compatible instance type (M5, R5, etc.) with encrypted root volume.")
-            elif AWSErrorHandler.is_auth_error(error_code):
-                print("💡 Check your AWS permissions for stopping EC2 instances.")
-            
-            return False
-
-    @aws_retry(max_attempts=3, operation_name="instance resume")
-    def resume_hibernated_instance(self, instance_identifier: str) -> bool:
-        """Resume a hibernated EC2 instance by ID or name."""
-        # Resolve instance name to ID if needed
-        instance_id = self._resolve_instance_identifier(instance_identifier)
-        if not instance_id:
-            return False
-        
-        try:
-            # First check if the instance is actually stopped
-            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-            instance = response['Reservations'][0]['Instances'][0]
-            current_state = instance['State']['Name']
-            spot_request_id = instance.get('SpotInstanceRequestId')
-            
-            if current_state == 'running':
-                print(f"Instance {instance_id} is already running!")
-                return True
-            elif current_state not in ['stopped', 'stopping']:
-                print(f"Instance {instance_id} is in '{current_state}' state. Can only resume stopped instances.")
-                return False
-            
-            # Check if hibernation was configured
-            hibernation_configured = instance.get('HibernationOptions', {}).get('Configured', False)
-            
-            # Special handling for hibernated spot instances
-            if spot_request_id and hibernation_configured:
-                print(f"Resuming hibernated spot instance {instance_id}...")
-                print("🔄 Note: Hibernated spot instances require special handling...")
-                
-                # Check spot request state
-                try:
-                    spot_response = self.ec2_client.describe_spot_instance_requests(
-                        SpotInstanceRequestIds=[spot_request_id]
-                    )
-                    spot_request = spot_response['SpotInstanceRequests'][0]
-                    spot_state = spot_request['State']
-                    spot_status = spot_request.get('Status', {}).get('Code', 'unknown')
-                    
-                    print(f"Spot request {spot_request_id} state: {spot_state}, status: {spot_status}")
-                    
-                    if spot_status == 'marked-for-stop':
-                        print("⚠️  Hibernated spot instance detected!")
-                        print("AWS will automatically restart this instance when spot capacity becomes available.")
-                        print("You can also try to restart manually, but it may fail if capacity is limited.")
-                        print("")
-                        
-                        # Try to start anyway, but handle the specific spot error gracefully
-                        try:
-                            print("Attempting manual restart...")
-                            self.ec2_client.start_instances(InstanceIds=[instance_id])
-                        except ClientError as spot_error:
-                            if "IncorrectSpotRequestState" in str(spot_error):
-                                print("❌ Manual restart failed: Spot request not in correct state")
-                                print("💡 Solutions:")
-                                print("   1. Wait for AWS to automatically restart (may take several minutes)")
-                                print("   2. Cancel spot request and create new instance")
-                                print("   3. Try again in a few minutes when spot capacity increases")
-                                print("")
-                                print("To cancel and recreate:")
-                                print(f"   ./spotman terminate {instance_identifier}")
-                                print(f"   ./spotman create --profile spot-hibernation --name {instance_identifier} --class hibernation")
-                                return False
-                            else:
-                                raise spot_error
-                    
-                except ClientError as spot_check_error:
-                    print(f"Warning: Could not check spot request: {spot_check_error}")
-                    # Fall through to regular start attempt
-                    
-            else:
-                # Regular hibernated instance (non-spot) or non-hibernated instance
-                if hibernation_configured:
-                    print(f"Resuming hibernated instance {instance_id}...")
-                    print("Note: Hibernated instances may take longer to start as they restore memory state.")
-                else:
-                    print(f"Resuming stopped instance {instance_id}...")
-                
-                # Start the instance
-                self.ec2_client.start_instances(InstanceIds=[instance_id])
-            
-            # Wait for instance to be running with extended timeout for hibernated instances
-            print("Waiting for instance to start...")
-            waiter = self.ec2_client.get_waiter('instance_running')
-            
-            # Use longer timeout for hibernated instances
-            max_attempts = 40 if hibernation_configured else 20  # 40 attempts = ~6.7 minutes
-            
-            try:
-                waiter.wait(
-                    InstanceIds=[instance_id],
-                    WaiterConfig={
-                        'Delay': 10,  # Check every 10 seconds
-                        'MaxAttempts': max_attempts
-                    }
-                )
-            except Exception as waiter_error:
-                print(f"Timeout waiting for instance to start: {waiter_error}")
-                if spot_request_id:
-                    print("For spot instances, AWS may restart automatically when capacity becomes available.")
-                print("Instance may still be starting. Check AWS console or try again in a few minutes.")
-                return False
-            
-            print(f"Instance {instance_id} resumed successfully!")
-            
-            if hibernation_configured:
-                print("✅ Hibernated state restored - memory contents and running processes preserved!")
-            
-            return True
-            
-        except ClientError as e:
-            print(f"Error resuming instance {instance_id}: {e}")
-            if "IncorrectSpotRequestState" in str(e):
-                print("\n💡 This is a known limitation with hibernated spot instances.")
-                print("Spot instances in hibernated state may not be manually restartable.")
-                print("AWS may restart them automatically when capacity becomes available.")
-            return False
-
-    @aws_retry(max_attempts=3, operation_name="hibernation status check")
-    def check_hibernation_status(self, instance_identifier: str) -> None:
-        """Check hibernation capability and status of an instance by ID or name."""
-        # Resolve instance name to ID if needed
-        instance_id = self._resolve_instance_identifier(instance_identifier)
-        if not instance_id:
-            return
-        
-        try:
-            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-            instance = response['Reservations'][0]['Instances'][0]
-            
-            instance_type = instance['InstanceType']
-            state = instance['State']['Name']
-            hibernation_configured = instance.get('HibernationOptions', {}).get('Configured', False)
-            
-            # Check if root volume is encrypted (required for hibernation)
-            root_volume_encrypted = False
-            try:
-                for bdm in instance.get('BlockDeviceMappings', []):
-                    if bdm.get('DeviceName') in ['/dev/sda1', '/dev/xvda']:
-                        volume_id = bdm['Ebs']['VolumeId']
-                        volume_response = self.ec2_client.describe_volumes(VolumeIds=[volume_id])
-                        root_volume_encrypted = volume_response['Volumes'][0]['Encrypted']
-                        break
-            except ClientError as volume_error:
-                print(f"⚠️  Could not check root volume encryption: {AWSErrorHandler.format_error_message(volume_error, 'volume check')}")
-            
-            print(f"Instance {instance_id} hibernation status:")
-            print(f"  Current state: {state}")
-            print(f"  Instance type: {instance_type}")
-            print(f"  Hibernation configured: {'Yes' if hibernation_configured else 'No'}")
-            print(f"  Root volume encrypted: {'Yes' if root_volume_encrypted else 'No'}")
-            
-            # Check hibernation compatibility
-            hibernation_compatible_families = self.get_hibernation_families()
-            instance_family = instance_type.split('.')[0]
-            hibernation_compatible = instance_family in hibernation_compatible_families
-            print(f"  Hibernation compatible: {'Yes' if hibernation_compatible else 'No'}")
-            
-            if hibernation_configured and hibernation_compatible and root_volume_encrypted:
-                print("  ✅ Instance is ready for hibernation")
-            else:
-                print("  ❌ Instance cannot be hibernated")
-                if not hibernation_configured:
-                    print("    - Hibernation not configured during launch")
-                if not hibernation_compatible:
-                    print(f"    - Instance type {instance_type} doesn't support hibernation")
-                if not root_volume_encrypted:
-                    print("    - Root volume must be encrypted for hibernation")
-            
-        except ClientError as e:
-            error_msg = AWSErrorHandler.format_error_message(e, f"checking hibernation status for {instance_id}")
-            print(f"❌ {error_msg}")
-            
-            error_code = e.response['Error']['Code']
-            if error_code == 'InvalidInstanceId.NotFound':
-                print("💡 The specified instance was not found.")
-            elif AWSErrorHandler.is_auth_error(error_code):
-                print("💡 Check your AWS permissions for describing EC2 instances and volumes.")
-
-    def _merge_profile_config(self, profile: Dict[str, Any], region: str) -> Dict[str, Any]:
-        """Merge profile with external region configuration."""
-        # Check if this is a legacy profile (has ami_id directly)
-        if 'ami_id' in profile:
-            print("Using legacy profile format")
-            return profile
-        
-        # Check if we have region configuration loaded
-        if not self.regions_config:
-            print("Error: No regions configuration available.")
-            print("Either use a legacy profile format or create a regions.yaml file.")
-            sys.exit(1)
-        
-        # Start with global defaults from regions.yaml
-        config = self.regions_config.get('defaults', {}).copy()
-        
-        # Add profile-specific settings (these override region defaults)
-        config.update(profile)
-        
-        # Get region-specific configuration
-        regions = self.regions_config.get('regions', {})
-        if region not in regions:
-            print(f"Error: No configuration found for region '{region}' in regions.yaml")
-            if regions:
-                available_regions = list(regions.keys())
-                print(f"Available regions: {available_regions}")
-            sys.exit(1)
-        
-        region_config = regions[region]
-        
-        # Merge region-specific settings (these have highest priority for region-specific items)
-        # AMI ID: use region-specific if available, otherwise use default
-        config['ami_id'] = region_config.get('ami_id') or config.get('ami_id')
-        # Key name always comes from region config (required per region)
-        config['key_name'] = region_config.get('key_name')
-        
-        # Use region defaults for network settings if not overridden in profile
-        if 'security_group_ids' not in profile:
-            config['security_group_ids'] = region_config.get('default_security_group_ids', [])
-        if 'subnet_id' not in profile:
-            default_subnet = region_config.get('default_subnet_id')
-            # Only set subnet_id if it's not None and not empty
-            if default_subnet and default_subnet.strip():
-                config['subnet_id'] = default_subnet
-        
-        print(f"Using configuration for region: {region}")
-        return config
-
-    def list_backups(self) -> List[str]:
-        """List all available SSH config backups."""
-        backup_dir = os.path.join(self._get_config_dir(), 'backups')
-        if not os.path.exists(backup_dir):
-            return []
-        
-        backups = []
-        for filename in os.listdir(backup_dir):
-            if filename.endswith('.backup'):
-                backup_path = os.path.join(backup_dir, filename)
-                backups.append(backup_path)
-        
-        # Sort by modification time (newest first)
-        backups.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        return backups
-
-    def restore_backup(self, backup_file: str, target_file: str = None) -> bool:
-        """Restore SSH config from a backup file."""
-        backup_dir = os.path.join(self._get_config_dir(), 'backups')
-        backup_path = os.path.join(backup_dir, backup_file) if not os.path.isabs(backup_file) else backup_file
-        
-        if not os.path.exists(backup_path):
-            print(f"Backup file not found: {backup_path}")
-            return False
-        
-        # Determine target file
-        if not target_file:
-            # Extract original filename from backup filename
-            backup_filename = os.path.basename(backup_path)
-            if '.backup_' in backup_filename:
-                original_filename = backup_filename.split('.backup_')[0]
-                if original_filename == 'config':
-                    target_file = os.path.expanduser('~/.ssh/config')
-                else:
-                    target_file = os.path.join(self._get_config_dir(), original_filename)
-            else:
-                print("Could not determine target file from backup filename")
-                return False
-        
-        try:
-            # Create backup of current file before restoring
-            self._backup_file(target_file)
-            
-            # Copy backup to target location
-            shutil.copy2(backup_path, target_file)
-            print(f"Successfully restored {target_file} from backup {backup_path}")
-            return True
-        except Exception as e:
-            print(f"Error restoring backup: {e}")
-            return False
-
-    def _get_spotman_ssh_config_path(self) -> str:
-        """Get the path to SpotMan's dedicated SSH config file."""
-        config_dir = self._get_config_dir()
-        return os.path.join(config_dir, 'ssh_config')
-
-    def _ensure_ssh_include_setup(self) -> None:
-        """Ensure the main SSH config includes SpotMan's config file."""
-        main_ssh_config = os.path.expanduser('~/.ssh/config')
-        spotman_config = self._get_spotman_ssh_config_path()
-        include_line = f"Include {spotman_config}"
-        
-        # Read main SSH config
-        try:
-            with open(main_ssh_config, 'r') as f:
-                content = f.read()
-        except FileNotFoundError:
-            content = ""
-        
-        # Check if Include directive already exists
-        if include_line not in content:
-            # Create backup before modifying
-            self._backup_file(main_ssh_config)
-            
-            # Add Include directive at the top
-            new_content = f"{include_line}\n\n{content}"
-            
-            # Ensure .ssh directory exists
-            ssh_dir = os.path.dirname(main_ssh_config)
-            os.makedirs(ssh_dir, exist_ok=True)
-            
-            # Write updated main config
-            with open(main_ssh_config, 'w') as f:
-                f.write(new_content)
-            
-            print(f"Added SpotMan SSH config include to {main_ssh_config}")
-            print(f"SpotMan SSH entries will be stored in {spotman_config}")
-
-    def _check_ssh_config_exists(self, host_name: str, ssh_config_path: str = None) -> bool:
-        """Check if an SSH config entry already exists for the given host name."""
-        if not ssh_config_path:
-            ssh_config_path = self._get_spotman_ssh_config_path()
-        
-        try:
-            with open(ssh_config_path, 'r') as f:
-                content = f.read()
-            
-            # Check if host entry already exists
-            lines = content.split('\n')
-            for line in lines:
-                if line.strip().startswith(f'Host {host_name}'):
-                    return True
-            return False
-        except FileNotFoundError:
-            return False
-
-    def _add_ssh_config_entry(self, instance_id: str, host_name: str, ssh_config_path: str = None) -> bool:
-        """Add SSH config entry for a newly created instance."""
-        if not ssh_config_path:
-            ssh_config_path = self._get_spotman_ssh_config_path()
-        
-        # Ensure SSH include setup is configured
-        self._ensure_ssh_include_setup()
-        
-        # Get instance details
-        try:
-            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-            instance = response['Reservations'][0]['Instances'][0]
-            public_ip = instance.get('PublicIpAddress')
-            key_name = instance.get('KeyName')
-            
-            if not public_ip:
-                print("Warning: Instance has no public IP address. SSH config entry not created.")
-                return False
-            
-            # Get the SSH user from regions configuration
-            ssh_user = 'ubuntu'  # default
-            if self.regions_config and 'regions' in self.regions_config and self.region in self.regions_config['regions']:
-                region_config = self.regions_config['regions'][self.region]
-                ssh_user = region_config.get('ssh_user', ssh_user)
-            
-            # Get the SSH key file path from regions configuration
-            identity_file = None
-            if key_name and self.regions_config and 'ssh_keys' in self.regions_config:
-                ssh_keys = self.regions_config['ssh_keys']
-                if key_name in ssh_keys:
-                    identity_file = ssh_keys[key_name]
-                else:
-                    print(f"Warning: SSH key '{key_name}' not found in regions configuration.")
-            
-            # Get port forwarding configuration from profile
-            profile = None
-            profile_name = None
-            for tag in instance.get('Tags', []):
-                if tag['Key'] == 'Profile':
-                    profile_name = tag['Value']
-                    profile = self.get_profile(profile_name)
-                    break
-            
-            port_forwards = []
-            if profile:
-                port_forwards = profile.get('ssh_port_forwards', [])
-            
-            # Create SSH config entry with comment and port forwarding
-            identity_line = f"    IdentityFile {identity_file}" if identity_file else ""
-            ssh_entry_lines = [
-                f"# SpotMan managed entry for {host_name} ({instance_id})",
-                f"Host {host_name}",
-                f"    HostName {public_ip}",
-                f"    User {ssh_user}",
-            ]
-            
-            if identity_line:
-                ssh_entry_lines.append(identity_line)
-            
-            ssh_entry_lines.append("    StrictHostKeyChecking no")
-            
-            # Add port forwarding rules
-            for forward in port_forwards:
-                local_port = forward.get('local_port')
-                remote_port = forward.get('remote_port')
-                remote_host = forward.get('remote_host', 'localhost')
-                
-                if local_port and remote_port:
-                    ssh_entry_lines.append(f"    LocalForward {local_port} {remote_host}:{remote_port}")
-            
-            ssh_entry = '\n'.join(ssh_entry_lines) + '\n'
-            
-            # Read existing config or create new
-            try:
-                with open(ssh_config_path, 'r') as f:
-                    content = f.read()
-            except FileNotFoundError:
-                content = "# SpotMan SSH Configuration\n# This file is automatically managed by SpotMan\n"
-            
-            # Append new entry
-            content = content.rstrip() + ssh_entry + '\n'
-            
-            # Ensure SpotMan config directory exists
-            config_dir = os.path.dirname(ssh_config_path)
-            os.makedirs(config_dir, exist_ok=True)
-            
-            # Create backup before modifying
-            self._backup_file(ssh_config_path)
-            
-            # Write updated SSH config
-            with open(ssh_config_path, 'w') as f:
-                f.write(content)
-            
-            print(f"SSH config entry added to {ssh_config_path}")
-            print(f"You can now connect with: ssh {host_name}")
-            return True
-            
-        except Exception as e:
-            print(f"Error adding SSH config entry: {e}")
-            return False
-
-    @aws_retry(max_attempts=3, operation_name="instance creation")
-    def create_instance(self, profile_name: str, name: str = None, app_class: str = None) -> str:
-        """Create a new EC2 instance based on a YAML profile."""
-        profile = self.load_profile(profile_name)
-        
-        # Get current region
-        current_region = self.region
-        
-        # Merge default and region-specific configuration
-        config = self._merge_profile_config(profile, current_region)
-        
-        # Extract configuration from merged profile
-        image_id = config.get('ami_id')
-        instance_type = config.get('instance_type', 't3.micro')
-        key_name = config.get('key_name')
-        security_groups = config.get('security_groups', [])
-        security_group_ids = config.get('security_group_ids', [])
-        subnet_id = config.get('subnet_id')
-        user_data = profile.get('user_data', '')
-        spot_instance = config.get('spot_instance', False)
-        hibernation_enabled = config.get('hibernation_enabled', False)
-        root_volume_size = config.get('root_volume_size', 8)
-        root_volume_type = config.get('root_volume_type', 'gp3')
-        
-        # Validate required fields
-        if not config.get('ami_id'):
-            print(f"Error: No AMI ID specified for region {current_region}")
-            print("Either specify ami_id in the region configuration or set a default ami_id.")
-            sys.exit(1)
-        if not config.get('key_name'):
-            print(f"Error: No key pair specified for region {current_region}")
-            sys.exit(1)
-        
-        # Show which AMI is being used
-        ami_source = "region-specific" if current_region in self.regions_config.get('regions', {}) and 'ami_id' in self.regions_config['regions'][current_region] else "default"
-        print(f"Using {ami_source} AMI: {image_id}")
-        
-        # Validate hibernation compatibility
-        if hibernation_enabled:
-            hibernation_compatible_families = self.get_hibernation_families()
-            instance_family = instance_type.split('.')[0]
-            if instance_family not in hibernation_compatible_families:
-                print(f"Warning: Instance type {instance_type} may not support hibernation.")
-                print(f"Hibernation-compatible families: {hibernation_compatible_families}")
-        
-        # Show configuration summary
-        print(f"Instance type: {instance_type}")
-        print(f"Spot instance: {'Yes' if spot_instance else 'No'}")
-        print(f"Hibernation: {'Enabled' if hibernation_enabled else 'Disabled'}")
-        print(f"Root volume: {root_volume_size}GB ({root_volume_type})")
-        
-        # Prepare tags
-        tags = profile.get('tags', {})
-        if name:
-            tags['Name'] = name
-        if app_class:
-            tags['ApplicationClass'] = app_class
-        if 'ApplicationClass' not in tags and not app_class:
-            print("Warning: No application class specified. Use --class or add it to the profile.")
-        
-        # Check if SSH config entry already exists for this name
-        host_name = name if name else None
-        if host_name and self._check_ssh_config_exists(host_name):
-            print(f"Error: SSH config entry for '{host_name}' already exists.")
-            print("Please choose a different instance name or remove the existing SSH config entry.")
-            sys.exit(1)
-        
-        # Add creation timestamp and metadata
-        tags['CreatedBy'] = 'spotman'
-        tags['CreatedAt'] = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
-        tags['Profile'] = profile_name  # Track which profile was used
-        if spot_instance:
-            tags['InstanceType'] = 'spot'
-        if hibernation_enabled:
-            tags['HibernationEnabled'] = 'true'
-        
-        # Convert tags to AWS format
-        tag_specifications = [{
-            'ResourceType': 'instance',
-            'Tags': [{'Key': k, 'Value': str(v)} for k, v in tags.items()]
-        }]
-        
-        # Configure block device mapping for custom root volume
-        block_device_mappings = [{
-            'DeviceName': '/dev/sda1',  # Default root device for Ubuntu
-            'Ebs': {
-                'VolumeSize': root_volume_size,
-                'VolumeType': root_volume_type,
-                'DeleteOnTermination': True,
-                'Encrypted': hibernation_enabled  # Hibernation requires encrypted root volume
-            }
-        }]
-        
-        # Prepare base launch parameters
-        launch_params = {
-            'ImageId': image_id,
-            'MinCount': 1,
-            'MaxCount': 1,
-            'InstanceType': instance_type,
-            'TagSpecifications': tag_specifications,
-            'BlockDeviceMappings': block_device_mappings
-        }
-        
-        # Add hibernation support
-        if hibernation_enabled:
-            launch_params['HibernationOptions'] = {'Configured': True}
-        
-        if key_name:
-            launch_params['KeyName'] = key_name
-        if security_groups:
-            launch_params['SecurityGroups'] = security_groups
-        if security_group_ids:
-            launch_params['SecurityGroupIds'] = security_group_ids
-        if subnet_id and subnet_id.strip():
-            launch_params['SubnetId'] = subnet_id
-        if user_data:
-            # Encode user data properly - AWS requires Base64 encoding
-            launch_params['UserData'] = base64.b64encode(user_data.encode('utf-8')).decode('utf-8')
-        
-        try:
-            print(f"Creating {'spot ' if spot_instance else ''}instance from profile: {profile_name}")
-            
-            if spot_instance:
-                # Modern approach: Use run_instances with InstanceMarketOptions
-                # This supports hibernation and all other features
-                launch_params['InstanceMarketOptions'] = {
-                    'MarketType': 'spot',
-                    'SpotOptions': {
-                        'SpotInstanceType': 'persistent'
-                    }
-                }
-                
-                if hibernation_enabled:
-                    print("Creating hibernation-enabled spot instance using InstanceMarketOptions...")
-                else:
-                    print("Creating spot instance using InstanceMarketOptions...")
-                
-                response = self.ec2_client.run_instances(**launch_params)
-                instance_id = response['Instances'][0]['InstanceId']
-                
-                print(f"✅ Spot instance {instance_id} created successfully!")
-                
-            else:
-                # Use regular on-demand instance
-                response = self.ec2_client.run_instances(**launch_params)
-                instance_id = response['Instances'][0]['InstanceId']
-            
-            print(f"✅ Instance {instance_id} created successfully!")
-            
-            if hibernation_enabled:
-                print("Note: Hibernation is enabled. Use 'sudo systemctl hibernate' to hibernate the instance.")
-            
-            print("Waiting for instance to be running...")
-            
-            waiter = self.ec2_client.get_waiter('instance_running')
-            waiter.wait(InstanceIds=[instance_id])
-            
-            print(f"✅ Instance {instance_id} is now running!")
-            
-            # Add SSH config entry if instance has a name
-            if host_name:
-                self._add_ssh_config_entry(instance_id, host_name)
-            
-            return instance_id
-            
-        except ClientError as e:
-            error_msg = AWSErrorHandler.format_error_message(e, "instance creation")
-            print(f"❌ {error_msg}")
-            
-            error_code = e.response['Error']['Code']
-            if error_code == 'InvalidAMIID.NotFound':
-                print("💡 The specified AMI ID was not found. Check your AMI ID in the profile or regions.yaml.")
-            elif error_code == 'InvalidKeyPair.NotFound':
-                print("💡 The specified key pair was not found. Check your key pair name in regions.yaml.")
-            elif error_code == 'InvalidSubnetId.NotFound':
-                print("💡 The specified subnet ID was not found. Check your subnet configuration.")
-            elif error_code == 'InsufficientInstanceCapacity':
-                print("💡 AWS doesn't have enough capacity for this instance type right now.")
-                print("   Try a different instance type or availability zone.")
-            elif error_code == 'UnsupportedOperation':
-                if hibernation_enabled:
-                    print("💡 Hibernation is not supported with this configuration.")
-                    print("   Ensure you're using a hibernation-compatible instance type and encrypted root volume.")
-            elif AWSErrorHandler.is_auth_error(error_code):
-                print("💡 Check your AWS permissions for EC2 instance creation.")
-            
-            sys.exit(1)
-
-    @aws_retry(max_attempts=3, operation_name="instance listing")
-    def list_instances(self, app_class: str = None, state: str = None, hibernation_enabled: Optional[bool] = None) -> List[Dict]:
-        """List all instances, optionally filtered by application class, state, and hibernation status."""
-        filters = []
-        
-        if app_class:
-            filters.append({
-                'Name': 'tag:ApplicationClass',
-                'Values': [app_class]
-            })
-        
-        if state:
-            filters.append({
-                'Name': 'instance-state-name',
-                'Values': [state]
-            })
-        
-        if hibernation_enabled is not None:
-            filters.append({
-                'Name': 'hibernation-options.configured',
-                'Values': ['true'] if hibernation_enabled else ['false']
-            })
-        
-        try:
-            response = self.ec2_client.describe_instances(Filters=filters)
-            instances = []
-            
-            for reservation in response['Reservations']:
-                for instance in reservation['Instances']:
-                    # Extract tags
-                    tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
-                    
-                    hibernation_configured = instance.get('HibernationOptions', {}).get('Configured', False)
-                    
-                    instance_info = {
-                        'InstanceId': instance['InstanceId'],
-                        'InstanceType': instance['InstanceType'],
-                        'State': instance['State']['Name'],
-                        'PublicIpAddress': instance.get('PublicIpAddress', 'N/A'),
-                        'PrivateIpAddress': instance.get('PrivateIpAddress', 'N/A'),
-                        'LaunchTime': instance['LaunchTime'],
-                        'Name': tags.get('Name', 'N/A'),
-                        'ApplicationClass': tags.get('ApplicationClass', 'N/A'),
-                        'HibernationEnabled': hibernation_configured,
-                        'Tags': tags
-                    }
-                    instances.append(instance_info)
-            
-            return instances
-            
-        except ClientError as e:
-            error_msg = AWSErrorHandler.format_error_message(e, "instance listing")
-            print(f"❌ {error_msg}")
-            
-            error_code = e.response['Error']['Code']
-            if AWSErrorHandler.is_auth_error(error_code):
-                print("💡 Check your AWS permissions for EC2 instance listing.")
-            elif error_code == 'InvalidFilter':
-                print("💡 One or more filters are invalid. Check filter names and values.")
-            
-            return []
-
-    @aws_retry(max_attempts=3, operation_name="instance stop")
-    def stop_instance(self, instance_identifier: str) -> bool:
-        """Stop an EC2 instance by ID or name."""
-        # Resolve instance name to ID if needed
-        instance_id = self._resolve_instance_identifier(instance_identifier)
-        if not instance_id:
-            return False
-        
-        try:
-            print(f"Stopping instance {instance_id}...")
-            self.ec2_client.stop_instances(InstanceIds=[instance_id])
-            
-            waiter = self.ec2_client.get_waiter('instance_stopped')
-            waiter.wait(InstanceIds=[instance_id])
-            
-            print(f"✅ Instance {instance_id} stopped successfully!")
-            return True
-            
-        except ClientError as e:
-            error_msg = AWSErrorHandler.format_error_message(e, f"stopping instance {instance_id}")
-            print(f"❌ {error_msg}")
-            
-            error_code = e.response['Error']['Code']
-            if error_code == 'InvalidInstanceId.NotFound':
-                print("💡 The specified instance was not found. It may have been terminated or you may be in the wrong region.")
-            elif error_code == 'IncorrectInstanceState':
-                print("💡 The instance is not in a state that can be stopped (e.g., already stopped or terminating).")
-            elif AWSErrorHandler.is_auth_error(error_code):
-                print("💡 Check your AWS permissions for stopping EC2 instances.")
-            
-            return False
-
-    @aws_retry(max_attempts=3, operation_name="instance lookup")
-    def _resolve_instance_identifier(self, identifier: str) -> Optional[str]:
-        """Resolve instance name or ID to instance ID."""
-        # If it looks like an instance ID (starts with i-), return as-is
-        if identifier.startswith('i-'):
-            return identifier
-        
-        # Otherwise, treat as instance name and look it up
-        try:
-            filters = [
-                {'Name': 'tag:Name', 'Values': [identifier]},
-                {'Name': 'instance-state-name', 'Values': ['running', 'stopped', 'pending', 'stopping']}
-            ]
-            
-            response = self.ec2_client.describe_instances(Filters=filters)
-            instances = []
-            
-            for reservation in response['Reservations']:
-                for instance in reservation['Instances']:
-                    instances.append(instance)
-            
-            if not instances:
-                print(f"❌ No instance found with name '{identifier}'")
-                return None
-            elif len(instances) > 1:
-                print(f"❌ Multiple instances found with name '{identifier}'. Please use instance ID:")
-                for instance in instances:
-                    state = instance['State']['Name']
-                    print(f"  {instance['InstanceId']} ({state})")
-                return None
-            else:
-                return instances[0]['InstanceId']
-                
-        except ClientError as e:
-            error_msg = AWSErrorHandler.format_error_message(e, f"looking up instance '{identifier}'")
-            print(f"❌ {error_msg}")
-            
-            error_code = e.response['Error']['Code']
-            if AWSErrorHandler.is_auth_error(error_code):
-                print("💡 Check your AWS permissions for listing EC2 instances.")
-            
-            return None
-
-    @aws_retry(max_attempts=3, operation_name="instance termination")
-    def terminate_instance(self, instance_identifier: str) -> bool:
-        """Terminate an EC2 instance by ID or name."""
-        # Resolve instance name to ID if needed
-        instance_id = self._resolve_instance_identifier(instance_identifier)
-        if not instance_id:
-            return False
-        
-        try:
-            # Check if this is a spot instance and get spot request ID
-            spot_request_id = None
-            try:
-                response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-                instance = response['Reservations'][0]['Instances'][0]
-                spot_request_id = instance.get('SpotInstanceRequestId')
-                
-                if spot_request_id:
-                    print(f"Instance {instance_id} is a spot instance (request: {spot_request_id})")
-            except ClientError as e:
-                print(f"⚠️  Could not check spot instance status: {AWSErrorHandler.format_error_message(e, 'spot instance check')}")
-            
-            # If this is a spot instance, cancel the spot request first
-            if spot_request_id:
-                try:
-                    print(f"Canceling spot request {spot_request_id}...")
-                    self.ec2_client.cancel_spot_instance_requests(
-                        SpotInstanceRequestIds=[spot_request_id]
-                    )
-                    print(f"✅ Spot request {spot_request_id} canceled successfully!")
-                    print("Now terminating the instance...")
-                    
-                except ClientError as e:
-                    error_msg = AWSErrorHandler.format_error_message(e, f"cancelling spot request {spot_request_id}")
-                    print(f"⚠️  {error_msg}")
-                    print("Proceeding with instance termination...")
-            
-            # Terminate the instance (for both spot and on-demand instances)
-            print(f"Terminating instance {instance_id}...")
-            self.ec2_client.terminate_instances(InstanceIds=[instance_id])
-            
-            waiter = self.ec2_client.get_waiter('instance_terminated')
-            waiter.wait(InstanceIds=[instance_id])
-            
-            print(f"✅ Instance {instance_id} terminated successfully!")
-            return True
-            
-        except ClientError as e:
-            error_msg = AWSErrorHandler.format_error_message(e, f"terminating instance {instance_id}")
-            print(f"❌ {error_msg}")
-            
-            error_code = e.response['Error']['Code']
-            if error_code == 'InvalidInstanceId.NotFound':
-                print("💡 The specified instance was not found. It may have already been terminated.")
-            elif error_code == 'IncorrectInstanceState':
-                print("💡 The instance is not in a state that can be terminated.")
-            elif AWSErrorHandler.is_auth_error(error_code):
-                print("💡 Check your AWS permissions for terminating EC2 instances.")
-            
-            return False
-
-    def _parse_ssh_config(self, content: str) -> Dict[str, List[str]]:
-        """Parse SSH config content into a dict of host -> lines."""
-        lines = content.split('\n')
-        hosts = {}
-        current_host = None
-        current_lines = []
-        
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith('Host ') and not stripped.startswith('HostName '):
-                # New host block
-                if current_host:
-                    hosts[current_host] = current_lines
-                current_host = stripped[5:].strip()  # Remove 'Host '
-                current_lines = [line]
-            elif current_host:
-                current_lines.append(line)
-            else:
-                # Global section before first host
-                if 'global' not in hosts:
-                    hosts['global'] = []
-                hosts['global'].append(line)
-        
-        if current_host:
-            hosts[current_host] = current_lines
-        
-        return hosts
-
-    def _rebuild_ssh_config(self, hosts: Dict[str, List[str]]) -> str:
-        """Rebuild SSH config content from parsed dict."""
-        lines = []
-        if 'global' in hosts:
-            lines.extend(hosts['global'])
-        for host, host_lines in hosts.items():
-            if host != 'global':
-                lines.extend(host_lines)
-        return '\n'.join(lines)
-
-    def update_ssh_config(self, instance_id: str = None, app_class: str = None, 
-                         ssh_config_path: str = None) -> bool:
-        """Update SSH config with instance public IP addresses."""
-        if not ssh_config_path:
-            ssh_config_path = self._get_spotman_ssh_config_path()
-        
-        # Ensure SSH include setup is configured
-        self._ensure_ssh_include_setup()
-        
-        # Get instances to update
-        if instance_id:
-            filters = [{'Name': 'instance-id', 'Values': [instance_id]}]
-        elif app_class:
-            filters = [{'Name': 'tag:ApplicationClass', 'Values': [app_class]}]
-        else:
-            filters = []
-        
-        instances = self.list_instances()
-        if filters:
-            # Filter instances based on criteria
-            if instance_id:
-                instances = [i for i in instances if i['InstanceId'] == instance_id]
-            elif app_class:
-                instances = [i for i in instances if i['ApplicationClass'] == app_class]
-        
-        if not instances:
-            print("No instances found matching the criteria.")
-            return False
-        
-        # Read existing SSH config
-        try:
-            with open(ssh_config_path, 'r') as f:
-                content = f.read()
-        except FileNotFoundError:
-            content = ""
-        
-        # Parse existing config
-        hosts = self._parse_ssh_config(content)
-        
-        # Update SSH config for each instance
-        for instance in instances:
-            if instance['State'] != 'running' or instance['PublicIpAddress'] == 'N/A':
-                continue
-
-            host_name = instance['Name'] if instance['Name'] != 'N/A' else instance['InstanceId']
-            
-            # Get the SSH user from regions configuration
-            ssh_user = 'ubuntu'  # default
-            if self.regions_config and 'regions' in self.regions_config and self.region in self.regions_config['regions']:
-                region_config = self.regions_config['regions'][self.region]
-                ssh_user = region_config.get('ssh_user', ssh_user)
-            
-            # Get the instance's key name for proper SSH key lookup
-            identity_file = None
-            try:
-                response = self.ec2_client.describe_instances(InstanceIds=[instance['InstanceId']])
-                instance_details = response['Reservations'][0]['Instances'][0]
-                key_name = instance_details.get('KeyName')
-                
-                if key_name and self.regions_config and 'ssh_keys' in self.regions_config:
-                    ssh_keys = self.regions_config['ssh_keys']
-                    if key_name in ssh_keys:
-                        identity_file = ssh_keys[key_name]
-                    else:
-                        print(f"⚠️  SSH key '{key_name}' not found in regions configuration for {host_name}.")
-            except ClientError as e:
-                error_msg = AWSErrorHandler.format_error_message(e, f"getting key name for instance {instance['InstanceId']}")
-                print(f"⚠️  {error_msg}")
-                print("   SSH config entry will be created without key file specification.")
-            
-            # Create SSH config entry lines
-            ssh_entry_lines = [
-                "",
-                f"# SpotMan managed entry for {host_name} ({instance['InstanceId']})",
-                f"Host {host_name}",
-                f"    HostName {instance['PublicIpAddress']}",
-                f"    User {ssh_user}",
-            ]
-            if identity_file:
-                ssh_entry_lines.append(f"    IdentityFile {identity_file}")
-            ssh_entry_lines.extend([
-                "    StrictHostKeyChecking no",
-                ""
-            ])
-            
-            # Update the hosts dict
-            hosts[host_name] = ssh_entry_lines
-        
-        # Rebuild and write the config
-        new_content = self._rebuild_ssh_config(hosts)
-        try:
-            # Create backup before modifying
-            self._backup_file(ssh_config_path)
-            
-            with open(ssh_config_path, 'w') as f:
-                f.write(new_content.strip() + '\n')
-            print(f"SSH config updated: {ssh_config_path}")
-            return True
-        except Exception as e:
-            print(f"Error updating SSH config: {e}")
-            return False
+# Import the core functionality
+from spotman_core import AWSInstanceManager
 
 
 def format_instances_table(instances: List[Dict]) -> None:
@@ -1734,19 +20,18 @@ def format_instances_table(instances: List[Dict]) -> None:
         print("No instances found.")
         return
     
-    # Calculate column widths
-    headers = ['ID', 'Name', 'Type', 'State', 'Public IP', 'App Class', 'Hibernation']
-    widths = [len(h) for h in headers]
+    headers = ['Name', 'Instance ID', 'Type', 'State', 'Public IP', 'App Class', 'Profile']
     
+    # Calculate column widths
+    widths = [len(h) for h in headers]
     for instance in instances:
-        widths[0] = max(widths[0], len(instance['InstanceId']))
-        widths[1] = max(widths[1], len(instance['Name']))
+        widths[0] = max(widths[0], len(instance['Name']))
+        widths[1] = max(widths[1], len(instance['InstanceId']))
         widths[2] = max(widths[2], len(instance['InstanceType']))
         widths[3] = max(widths[3], len(instance['State']))
         widths[4] = max(widths[4], len(instance['PublicIpAddress']))
         widths[5] = max(widths[5], len(instance['ApplicationClass']))
-        hibernation_str = 'Yes' if instance.get('HibernationEnabled', False) else 'No'
-        widths[6] = max(widths[6], len(hibernation_str))
+        widths[6] = max(widths[6], len(instance['Profile']))
     
     # Print header
     header_line = ' | '.join(h.ljust(w) for h, w in zip(headers, widths))
@@ -1755,21 +40,68 @@ def format_instances_table(instances: List[Dict]) -> None:
     
     # Print instances
     for instance in instances:
-        hibernation_str = 'Yes' if instance.get('HibernationEnabled', False) else 'No'
         row = [
-            instance['InstanceId'].ljust(widths[0]),
-            instance['Name'].ljust(widths[1]),
+            instance['Name'].ljust(widths[0]),
+            instance['InstanceId'].ljust(widths[1]),
             instance['InstanceType'].ljust(widths[2]),
             instance['State'].ljust(widths[3]),
             instance['PublicIpAddress'].ljust(widths[4]),
             instance['ApplicationClass'].ljust(widths[5]),
-            hibernation_str.ljust(widths[6])
+            instance['Profile'].ljust(widths[6])
         ]
         print(' | '.join(row))
+    
+    print(f"\nTotal: {len(instances)} instance(s)")
+
+
+def format_profiles_table(profiles: List[str], manager: AWSInstanceManager) -> None:
+    """Format and print profiles in a table."""
+    if not profiles:
+        print("No profiles found.")
+        return
+    
+    print("Available Profiles:")
+    print("=" * 50)
+    
+    for profile_name in profiles:
+        try:
+            profile = manager.get_profile(profile_name)
+            if profile:
+                instance_type = profile.get('instance_type', 'Not specified')
+                spot_instance = profile.get('spot_instance', False)
+                hibernation = profile.get('hibernation_enabled', False)
+                os_type = profile.get('os_type', 'ubuntu')
+                
+                print(f"\n📋 {profile_name}")
+                print(f"   Instance Type: {instance_type}")
+                print(f"   OS Type: {os_type}")
+                print(f"   Spot Instance: {'✅ Yes' if spot_instance else '❌ No'}")
+                print(f"   Hibernation: {'✅ Yes' if hibernation else '❌ No'}")
+                
+                # Show port forwarding if configured
+                port_forwards = profile.get('ssh_port_forwards', [])
+                if port_forwards:
+                    print(f"   Port Forwarding:")
+                    for forward in port_forwards:
+                        local_port = forward.get('local_port')
+                        remote_port = forward.get('remote_port', local_port)
+                        remote_host = forward.get('remote_host', 'localhost')
+                        print(f"     {local_port} -> {remote_host}:{remote_port}")
+                
+                # Show application class if specified
+                app_class = profile.get('tags', {}).get('ApplicationClass')
+                if app_class:
+                    print(f"   Default App Class: {app_class}")
+            else:
+                print(f"\n❌ {profile_name} (Error loading)")
+        except Exception as e:
+            print(f"\n❌ {profile_name} (Error: {e})")
+    
+    print(f"\nTotal: {len(profiles)} profile(s)")
 
 
 def main():
-    """Main entry point for SpotMan."""
+    """Main entry point for SpotMan CLI."""
     parser = argparse.ArgumentParser(
         description='SpotMan - AWS EC2 Instance Manager with Application Class Support',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1778,22 +110,13 @@ Examples:
   %(prog)s create --profile web-server --name web01 --class web
   %(prog)s create --profile spot-hibernation --name spot01 --class spot
   %(prog)s list --class web --state running
-  %(prog)s list --hibernation-enabled true
-  %(prog)s list --all-regions --hibernation-enabled true
-  %(prog)s stop i-1234567890abcdef0
+  %(prog)s start web01
   %(prog)s stop web01
-  %(prog)s terminate i-1234567890abcdef0
-  %(prog)s terminate spot01
+  %(prog)s hibernate spot01
+  %(prog)s resume spot01
   %(prog)s update-ssh --class web
-  %(prog)s backup list
-  %(prog)s backup restore config.backup_20231201_120000
-  %(prog)s region show
-  %(prog)s region set us-west-2
-  %(prog)s region list
-  %(prog)s hibernate start i-1234567890abcdef0
-  %(prog)s hibernate start spot01
-  %(prog)s hibernate resume spot01
-  %(prog)s hibernate status spot01
+  %(prog)s terminate web01
+  %(prog)s list-profiles
         """
     )
     
@@ -1804,77 +127,50 @@ Examples:
     
     # Create command
     create_parser = subparsers.add_parser('create', help='Create a new instance')
-    create_parser.add_argument('--profile', required=True, 
-                              help='Profile name (without .yaml extension)')
-    create_parser.add_argument('--name', help='Instance name')
+    create_parser.add_argument('--profile', required=True, help='Profile to use')
+    create_parser.add_argument('--name', required=True, help='Instance name')
     create_parser.add_argument('--class', help='Application class tag')
+    create_parser.add_argument('--spot-price', type=float, help='Maximum spot price')
+    create_parser.add_argument('--dry-run', action='store_true', help='Validate without creating')
     
     # List command
     list_parser = subparsers.add_parser('list', help='List instances')
     list_parser.add_argument('--class', help='Filter by application class')
-    list_parser.add_argument('--state', choices=['running', 'stopped', 'terminated', 'pending'],
-                            help='Filter by instance state')
-    list_parser.add_argument('--hibernation-enabled', choices=['true', 'false'], 
-                            help='Filter by hibernation enabled status')
-    list_parser.add_argument('--all-regions', action='store_true', 
-                            help='List instances from all configured regions')
-    list_parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    list_parser.add_argument('--state', help='Filter by state')
+    list_parser.add_argument('--profile', help='Filter by profile')
+    
+    # Start command
+    start_parser = subparsers.add_parser('start', help='Start an instance')
+    start_parser.add_argument('instance', help='Instance name or ID')
     
     # Stop command
     stop_parser = subparsers.add_parser('stop', help='Stop an instance')
-    stop_parser.add_argument('instance_id', help='Instance ID or name to stop')
+    stop_parser.add_argument('instance', help='Instance name or ID')
+    
+    # Hibernate command
+    hibernate_parser = subparsers.add_parser('hibernate', help='Hibernate an instance')
+    hibernate_parser.add_argument('instance', help='Instance name or ID')
+    
+    # Resume command
+    resume_parser = subparsers.add_parser('resume', help='Resume a hibernated instance')
+    resume_parser.add_argument('instance', help='Instance name or ID')
     
     # Terminate command
     terminate_parser = subparsers.add_parser('terminate', help='Terminate an instance')
-    terminate_parser.add_argument('instance_id', help='Instance ID or name to terminate')
+    terminate_parser.add_argument('instance', help='Instance name or ID')
     
-    # Update SSH config command
-    ssh_parser = subparsers.add_parser('update-ssh', help='Update SSH config')
-    ssh_parser.add_argument('--instance-id', help='Update config for specific instance')
-    ssh_parser.add_argument('--class', help='Update config for all instances in app class')
-    ssh_parser.add_argument('--config-path', help='SSH config file path (default: ~/.ssh/config)')
+    # Hibernation status command
+    status_parser = subparsers.add_parser('hibernation-status', help='Check hibernation status')
+    status_parser.add_argument('instance', help='Instance name or ID')
     
-    # Backup management command
-    backup_parser = subparsers.add_parser('backup', help='Manage SSH config backups')
-    backup_subparsers = backup_parser.add_subparsers(dest='backup_command', help='Backup commands')
+    # Update SSH command
+    ssh_parser = subparsers.add_parser('update-ssh', help='Update SSH configuration')
+    ssh_parser.add_argument('--instance', help='Specific instance to update')
+    ssh_parser.add_argument('--class', help='Update instances with this application class')
+    ssh_parser.add_argument('--profile', help='Update instances with this profile')
     
-    # List backups
-    backup_subparsers.add_parser('list', help='List available SSH config backups')
-    
-    # Restore backup
-    restore_parser = backup_subparsers.add_parser('restore', help='Restore SSH config from backup')
-    restore_parser.add_argument('backup_file', help='Backup file to restore')
-    restore_parser.add_argument('--target', help='Target file to restore to (default: original location)')
-    
-    # Region management commands
-    region_parser = subparsers.add_parser('region', help='Manage default region')
-    region_subparsers = region_parser.add_subparsers(dest='region_command', help='Region commands')
-    
-    # Show current region
-    region_subparsers.add_parser('show', help='Show current default region')
-    
-    # Set default region
-    set_region_parser = region_subparsers.add_parser('set', help='Set default region')
-    set_region_parser.add_argument('region_name', help='Region name to set as default')
-    
-    # List available regions
-    region_subparsers.add_parser('list', help='List available regions from configuration')
-    
-    # Hibernation management commands
-    hibernation_parser = subparsers.add_parser('hibernate', help='Manage instance hibernation')
-    hibernation_subparsers = hibernation_parser.add_subparsers(dest='hibernation_command', help='Hibernation commands')
-    
-    # Hibernate instance
-    hibernate_parser = hibernation_subparsers.add_parser('start', help='Hibernate an instance')
-    hibernate_parser.add_argument('instance_id', help='Instance ID or name to hibernate')
-    
-    # Resume instance
-    resume_parser = hibernation_subparsers.add_parser('resume', help='Resume a hibernated instance')
-    resume_parser.add_argument('instance_id', help='Instance ID or name to resume')
-    
-    # Check hibernation status
-    status_parser = hibernation_subparsers.add_parser('status', help='Check hibernation capability of an instance')
-    status_parser.add_argument('instance_id', help='Instance ID or name to check')
+    # List profiles command
+    profiles_parser = subparsers.add_parser('list-profiles', help='List available profiles')
     
     args = parser.parse_args()
     
@@ -1882,97 +178,68 @@ Examples:
         parser.print_help()
         sys.exit(1)
     
-    # Initialize manager
-    manager = AWSInstanceManager(region=args.region, profile=getattr(args, 'aws_profile', None))
+    # Initialize the manager
+    try:
+        manager = AWSInstanceManager(region=args.region, profile=args.aws_profile)
+    except Exception as e:
+        print(f"Error initializing SpotMan: {e}")
+        sys.exit(1)
     
     # Execute commands
     if args.command == 'create':
-        instance_id = manager.create_instance(args.profile, args.name, getattr(args, 'class'))
-        print(f"Created instance: {instance_id}")
+        app_class = getattr(args, 'class', None)
+        if not app_class:
+            print("Warning: No application class specified. Use --class or add it to the profile.")
+        
+        instance_id = manager.create_instance(
+            args.profile, 
+            args.name, 
+            app_class, 
+            args.spot_price, 
+            args.dry_run
+        )
+        
+        if instance_id and not args.dry_run:
+            print(f"Instance created: {instance_id}")
     
     elif args.command == 'list':
-        hibernation_enabled = args.hibernation_enabled == 'true' if args.hibernation_enabled else None
-        if args.all_regions:
-            all_instances = []
-            if manager.regions_config and 'regions' in manager.regions_config:
-                for region_name in manager.regions_config['regions']:
-                    try:
-                        region_manager = AWSInstanceManager(region=region_name, profile=getattr(args, 'aws_profile', None))
-                        region_instances = region_manager.list_instances(getattr(args, 'class'), args.state, hibernation_enabled)
-                        all_instances.extend(region_instances)
-                    except Exception as e:
-                        print(f"Error listing in region {region_name}: {e}")
-            instances = all_instances
-        else:
-            instances = manager.list_instances(getattr(args, 'class'), args.state, hibernation_enabled)
-        if args.json:
-            print(json.dumps(instances, indent=2, default=str))
-        else:
-            format_instances_table(instances)
+        app_class = getattr(args, 'class', None)
+        instances = manager.list_instances(
+            app_class=app_class,
+            state=args.state,
+            profile_name=args.profile
+        )
+        format_instances_table(instances)
+    
+    elif args.command == 'start':
+        manager.start_instance(args.instance)
     
     elif args.command == 'stop':
-        manager.stop_instance(args.instance_id)
-    
-    elif args.command == 'terminate':
-        manager.terminate_instance(args.instance_id)
-    
-    elif args.command == 'update-ssh':
-        manager.update_ssh_config(args.instance_id, getattr(args, 'class'), args.config_path)
-    
-    elif args.command == 'backup':
-        if not args.backup_command:
-            backup_parser.print_help()
-            sys.exit(1)
-        
-        if args.backup_command == 'list':
-            backups = manager.list_backups()
-            if not backups:
-                print("No SSH config backups found.")
-            else:
-                print("Available SSH config backups:")
-                for backup in backups:
-                    mtime = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(os.path.getmtime(backup)))
-                    size = os.path.getsize(backup)
-                    print(f"  {os.path.basename(backup)} ({size} bytes, {mtime})")
-        
-        elif args.backup_command == 'restore':
-            manager.restore_backup(args.backup_file, getattr(args, 'target', None))
-    
-    elif args.command == 'region':
-        if not args.region_command:
-            region_parser.print_help()
-            sys.exit(1)
-        
-        if args.region_command == 'show':
-            current_region = manager.get_current_region()
-            print(f"Current default region: {current_region}")
-            
-        elif args.region_command == 'set':
-            manager.set_default_region(args.region_name)
-            
-        elif args.region_command == 'list':
-            if manager.regions_config and 'regions' in manager.regions_config:
-                regions = list(manager.regions_config['regions'].keys())
-                print("Available regions from configuration:")
-                for region in sorted(regions):
-                    marker = " (current)" if region == manager.get_current_region() else ""
-                    print(f"  {region}{marker}")
-            else:
-                print("No regions configuration found. Create regions.yaml file.")
+        manager.stop_instance(args.instance)
     
     elif args.command == 'hibernate':
-        if not args.hibernation_command:
-            hibernation_parser.print_help()
-            sys.exit(1)
-        
-        if args.hibernation_command == 'start':
-            manager.hibernate_instance(args.instance_id)
-            
-        elif args.hibernation_command == 'resume':
-            manager.resume_hibernated_instance(args.instance_id)
-            
-        elif args.hibernation_command == 'status':
-            manager.check_hibernation_status(args.instance_id)
+        manager.hibernate_instance(args.instance)
+    
+    elif args.command == 'resume':
+        manager.resume_hibernated_instance(args.instance)
+    
+    elif args.command == 'terminate':
+        manager.terminate_instance(args.instance)
+    
+    elif args.command == 'hibernation-status':
+        manager.check_hibernation_status(args.instance)
+    
+    elif args.command == 'update-ssh':
+        app_class = getattr(args, 'class', None)
+        manager.update_ssh_config(
+            instance_id=args.instance,
+            profile_name=args.profile,
+            app_class=app_class
+        )
+    
+    elif args.command == 'list-profiles':
+        profiles = manager.list_profiles()
+        format_profiles_table(profiles, manager)
 
 
 if __name__ == '__main__':

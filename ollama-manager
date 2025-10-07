@@ -13,12 +13,24 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 import yaml
-import boto3
-from botocore.exceptions import ClientError
+import importlib.util
 
 # Import SpotMan's AWSInstanceManager for core functionality
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from spotman import AWSInstanceManager
+try:
+    from spotman_core import AWSInstanceManager
+except ImportError as e:
+    print(f"Error importing SpotMan core library: {e}")
+    print("Please make sure spotman_core.py is in the same directory as ollama-manager")
+    sys.exit(1)
+
+# Import boto3 after spotman import to catch AWS-specific errors separately
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError as e:
+    print(f"Error importing AWS libraries: {e}")
+    print("Please install AWS dependencies: pip install boto3 botocore")
+    sys.exit(1)
 
 
 class OllamaManager:
