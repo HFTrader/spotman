@@ -58,6 +58,21 @@ Create an on-demand hibernation instance:
 
 ## Installation
 
+### Automated Setup
+
+Use the setup script for easy installation:
+```bash
+./setup.sh
+```
+
+This will:
+- Install Python dependencies
+- Set executable permissions for both `spotman` and `ollama-manager` 
+- Verify the installation
+- Create optional symlinks in `/usr/local/bin` (if writable)
+
+### Manual Setup
+
 1. Install Python dependencies:
 ```bash
 pip install -r requirements.txt
@@ -69,10 +84,20 @@ pip install -r requirements.txt
    - IAM roles (if running on EC2)
    - AWS credentials file
 
-3. Make the script executable:
+3. Make the scripts executable:
 ```bash
 chmod +x spotman
+chmod +x ollama-manager
 ```
+
+### File Structure
+
+SpotMan consists of:
+- `spotman_core.py` - Core AWS functionality library
+- `spotman` - Main CLI frontend
+- `ollama-manager` - Specialized Ollama LLM server manager
+- `profiles/` - Instance configuration profiles
+- `scripts/` - Setup and configuration scripts
 
 ## User Configuration Directory
 

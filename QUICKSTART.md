@@ -1,24 +1,27 @@
 # SpotMan - Enhanced AWS Instance Manager
 
 ```
-aws/
-├── spotman                     # Main script with hibernation & native YAML support
-├── regions.yaml               # Region-specific configuration
+spotman/
+├── spotman                     # Main CLI frontend script
+├── ollama-manager             # Specialized Ollama LLM server manager
+├── spotman_core.py            # Core AWS functionality library
+├── regions.yaml               # Region-specific configuration (if exists)
 ├── requirements.txt            # Python dependencies
 ├── setup.sh                   # Setup script
 ├── README.md                  # Comprehensive documentation
 ├── HIBERNATION.md             # Hibernation feature guide
 ├── profiles/                  # Instance profile templates with native includes
 │   ├── web-server.yaml        # Web server application profile
-│   ├── database.yaml          # Database application profile
+│   ├── ollama-spot.yaml       # Ollama LLM server with hibernation
 │   ├── test.yaml             # Minimal test profile
 │   ├── spot-hibernation.yaml # Spot instance with hibernation support
 │   └── hibernation-ondemand.yaml # On-demand hibernation for production
 └── scripts/                   # External scripts for modular architecture
     ├── hibernation-setup.sh   # Comprehensive hibernation configuration
-    ├── webserver-setup.sh    # Complete web server setup
-    ├── test-setup.sh         # Basic test environment
-    └── README.md             # Script documentation
+    ├── ollama-setup.sh        # Complete Ollama LLM server setup
+    ├── webserver-setup.sh     # Complete web server setup
+    ├── test-setup.sh          # Basic test environment
+    └── README.md              # Script documentation
 ```
 
 ## Quick Start
@@ -56,9 +59,19 @@ aws/
    ./spotman create --profile hibernation-ondemand --name prod-work --class production
    ```
 
-7. **List instances:**
+7. **Create Ollama LLM instances:**
+   ```bash
+   # Create Ollama instance with automatic setup
+   ./ollama-manager create --name ollama01
+   
+   # Create with custom instance type
+   ./ollama-manager create --name ollama-gpu --type g5.xlarge
+   ```
+
+8. **List instances:**
    ```bash
    ./spotman list
+   ./ollama-manager list
    ```
 
 8. **Hibernation operations:**
