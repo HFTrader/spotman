@@ -9,7 +9,6 @@ import argparse
 import os
 import sys
 import time
-import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 import yaml
@@ -43,54 +42,141 @@ class OllamaManager:
         self.ec2_client = self.spotman.ec2_client
     
     def create_ollama_instance(self, name: str = None, instance_type: str = None, 
-                             spot: bool = True) -> Optional[str]:
+                             spot: bool = True, profile: str = None) -> Optional[str]:
         """Create a new Ollama instance using SpotMan framework."""
         if not name:
             name = f"ollama-{int(time.time())}"
         
         print(f"Creating Ollama instance: {name}")
         
-        # Use the ollama-spot profile by default
-        profile_name = "ollama-spot"
+        # Determine which profile to use
+        if profile:
+            profile_name = profile
+        elif instance_type:
+            # Map instance types to appropriate profiles
+            type_to_profile = {
+                # Budget CPU instances
+                'm5.large': 'ollama-cpu-budget',
+                'm5.xlarge': 'ollama-cpu-budget', 
+                't3.large': 'ollama-cpu-budget',
+                't3.xlarge': 'ollama-cpu-budget',
+                
+                # Performance CPU instances  
+                'c5.2xlarge': 'ollama-cpu-performance',
+                'c5.4xlarge': 'ollama-cpu-performance',
+                'c5.9xlarge': 'ollama-cpu-performance',
+                'c5.12xlarge': 'ollama-cpu-performance',
+                
+                # Standard GPU instances
+                'g5.xlarge': 'ollama-gpu-standard',
+                'g4dn.xlarge': 'ollama-gpu-standard',
+                'g4dn.2xlarge': 'ollama-gpu-standard',
+                
+                # Premium GPU instances
+                'g5.2xlarge': 'ollama-gpu-premium',
+                'g5.4xlarge': 'ollama-gpu-premium',
+                'g5.8xlarge': 'ollama-gpu-premium',
+                'p3.2xlarge': 'ollama-gpu-premium',
+            }
+            
+            profile_name = type_to_profile.get(instance_type, 'ollama-gpu-standard')
+            print(f"Using profile '{profile_name}' for instance type '{instance_type}'")
+        else:
+            # Default to standard GPU profile
+            profile_name = "ollama-gpu-standard"
         
-        # Override instance type if specified
+        # Override instance type if specified and different from profile
         if instance_type:
             # Create a temporary profile with the custom instance type
-            profile = self.spotman.load_profile(profile_name)
-            profile['instance_type'] = instance_type
-            
-            # Save temporary profile
-            temp_profile_path = f"/tmp/ollama-custom-{int(time.time())}.yaml"
-            with open(temp_profile_path, 'w') as f:
-                yaml.dump(profile, f)
-            
-            print(f"Using custom instance type: {instance_type}")
-            
-            # Load from temporary profile
-            profile_name = temp_profile_path.replace('.yaml', '').split('/')[-1]
-            
-            # Copy to profiles directory temporarily
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            temp_dest = os.path.join(script_dir, 'profiles', f'{profile_name}.yaml')
-            os.makedirs(os.path.dirname(temp_dest), exist_ok=True)
-            
-            import shutil
-            shutil.copy2(temp_profile_path, temp_dest)
-            
             try:
-                instance_id = self.spotman.create_instance(profile_name, name, "ollama")
-                return instance_id
-            finally:
-                # Clean up temporary profile
+                profile_config = self.spotman.load_profile(profile_name)
+                profile_config['instance_type'] = instance_type
+                
+                # Save temporary profile
+                temp_profile_path = f"/tmp/ollama-custom-{int(time.time())}.yaml"
+                with open(temp_profile_path, 'w') as f:
+                    yaml.dump(profile_config, f)
+                
+                print(f"Using custom instance type: {instance_type}")
+                
+                # Load from temporary profile
+                temp_profile_name = f"ollama-custom-{int(time.time())}"
+                
+                # Copy to profiles directory temporarily
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                temp_dest = os.path.join(script_dir, 'profiles', f'{temp_profile_name}.yaml')
+                os.makedirs(os.path.dirname(temp_dest), exist_ok=True)
+                
+                import shutil
+                shutil.copy2(temp_profile_path, temp_dest)
+                
                 try:
-                    os.remove(temp_dest)
-                    os.remove(temp_profile_path)
-                except:
-                    pass
+                    instance_id = self.spotman.create_instance(temp_profile_name, name, "ollama")
+                    return instance_id
+                finally:
+                    # Clean up temporary profile
+                    try:
+                        os.remove(temp_dest)
+                        os.remove(temp_profile_path)
+                    except:
+                        pass
+            except Exception as e:
+                print(f"Error with custom instance type, using default profile: {e}")
+                return self.spotman.create_instance(profile_name, name, "ollama")
         else:
-            # Use default profile
+            # Use profile as-is
             return self.spotman.create_instance(profile_name, name, "ollama")
     
+    def list_ollama_profiles(self) -> None:
+        """List available Ollama profiles with descriptions."""
+        profiles_info = {
+            'ollama-cpu-budget': {
+                'instance_type': 'm5.large',
+                'description': 'Budget CPU instance for development and smaller models (7B-13B)',
+                'cost': '~$15-30/month',
+                'performance': '2-8 tokens/second',
+                'best_for': 'Development, testing, 7B models'
+            },
+            'ollama-cpu-performance': {
+                'instance_type': 'c5.4xlarge', 
+                'description': 'High-performance CPU for larger models without GPU',
+                'cost': '~$60-120/month',
+                'performance': '5-20 tokens/second',
+                'best_for': '33B+ models, CPU-only inference'
+            },
+            'ollama-gpu-standard': {
+                'instance_type': 'g5.xlarge',
+                'description': 'Standard GPU instance with NVIDIA A10G (24GB VRAM)',
+                'cost': '~$100-200/month', 
+                'performance': '15-50 tokens/second',
+                'best_for': '7B-70B models, GPU acceleration'
+            },
+            'ollama-gpu-premium': {
+                'instance_type': 'g5.2xlarge',
+                'description': 'Premium GPU instance for maximum performance',
+                'cost': '~$200-400/month',
+                'performance': '30-100+ tokens/second', 
+                'best_for': '70B+ models, production workloads'
+            }
+        }
+        
+        print("\nAvailable Ollama Profiles:\n")
+        
+        for profile_name, info in profiles_info.items():
+            print(f"📋 {profile_name}")
+            print(f"   Instance Type: {info['instance_type']}")
+            print(f"   Description: {info['description']}")
+            print(f"   Estimated Cost: {info['cost']} (spot pricing)")
+            print(f"   Performance: {info['performance']}")
+            print(f"   Best For: {info['best_for']}")
+            print()
+        
+        print("Usage Examples:")
+        print("  ./ollama-manager create --profile ollama-cpu-budget --name ollama-dev")
+        print("  ./ollama-manager create --profile ollama-gpu-standard --name ollama-prod")
+        print("  ./ollama-manager create --type g5.2xlarge --name ollama-premium")
+        print()
+
     def list_ollama_instances(self) -> List[Dict]:
         """List all Ollama instances."""
         return self.spotman.list_instances(app_class="ollama")
@@ -140,162 +226,25 @@ class OllamaManager:
     
     def connect_to_ollama(self, instance_identifier: str, port: int = 11434) -> None:
         """Connect to Ollama instance via SSH with port forwarding."""
-        instance_id = self.spotman._resolve_instance_identifier(instance_identifier)
-        if not instance_id:
-            return
-        
-        # Get instance details
-        try:
-            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-            instance = response['Reservations'][0]['Instances'][0]
-            
-            if instance['State']['Name'] != 'running':
-                print(f"Instance {instance_identifier} is not running. Current state: {instance['State']['Name']}")
-                print("Use 'start' command to start the instance first.")
-                return
-            
-            public_ip = instance.get('PublicIpAddress')
-            if not public_ip:
-                print("Instance has no public IP address.")
-                return
-            
-            # Get SSH key
-            key_name = instance.get('KeyName')
-            identity_file = "~/.ssh/your-key.pem"  # Default fallback
-            
-            if key_name and self.spotman.regions_config and 'ssh_keys' in self.spotman.regions_config:
-                ssh_keys = self.spotman.regions_config['ssh_keys']
-                if key_name in ssh_keys:
-                    identity_file = ssh_keys[key_name]
-            
-            # Check if SSH config entry exists
-            ssh_config_path = self.spotman._get_spotman_ssh_config_path()
-            host_name = instance_identifier if not instance_identifier.startswith('i-') else f"ollama-{instance_id}"
-            
-            if self.spotman._check_ssh_config_exists(host_name, ssh_config_path):
-                print(f"Connecting to {host_name} with automatic port forwarding...")
-                print(f"Ollama API will be available at: http://localhost:{port}")
-                print(f"Press Ctrl+C to disconnect")
-                subprocess.run(['ssh', host_name])
-            else:
-                print(f"SSH config not found. Connecting directly...")
-                print(f"Port forwarding: {port}:localhost:{port}")
-                print(f"Ollama API will be available at: http://localhost:{port}")
-                print(f"Press Ctrl+C to disconnect")
-                
-                ssh_cmd = [
-                    'ssh', '-i', os.path.expanduser(identity_file),
-                    '-L', f'{port}:localhost:{port}',
-                    '-o', 'StrictHostKeyChecking=no',
-                    f'ubuntu@{public_ip}'
-                ]
-                subprocess.run(ssh_cmd)
-        
-        except ClientError as e:
-            print(f"Error connecting to instance: {e}")
+        self.spotman.connect_to_instance(instance_identifier, [port], "Ollama")
     
     def test_ollama_connection(self, instance_identifier: str, local_port: int = 11434) -> bool:
         """Test if Ollama service is accessible via port forwarding."""
-        import requests
-        import socket
-        
-        # Check if local port is being forwarded
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            result = sock.connect_ex(('localhost', local_port))
-            sock.close()
-            
-            if result != 0:
-                print(f"Port {local_port} is not open locally.")
-                print(f"Make sure you're connected to {instance_identifier} with SSH port forwarding.")
-                print(f"Use: ollama-manager connect {instance_identifier}")
-                return False
-            
-            # Test Ollama API
-            try:
-                response = requests.get(f'http://localhost:{local_port}/api/version', timeout=5)
-                if response.status_code == 200:
-                    version_info = response.json()
-                    print(f"✅ Ollama connection successful!")
-                    print(f"   Version: {version_info.get('version', 'unknown')}")
-                    return True
-                else:
-                    print(f"❌ Ollama API returned status code: {response.status_code}")
-                    return False
-            except requests.RequestException as e:
-                print(f"❌ Ollama API connection failed: {e}")
-                return False
-                
-        except Exception as e:
-            print(f"❌ Connection test failed: {e}")
-            return False
+        return self.spotman.test_service_connection(
+            instance_identifier, local_port, "/api/version", "Ollama"
+        )
     
     def show_ollama_logs(self, instance_identifier: str) -> None:
         """Show Ollama service logs from the instance."""
-        host_name = instance_identifier if not instance_identifier.startswith('i-') else f"ollama-{instance_identifier}"
-        
-        print(f"Showing Ollama logs from {host_name}...")
-        print("Press Ctrl+C to exit")
-        
-        try:
-            subprocess.run([
-                'ssh', host_name, 
-                'sudo journalctl -u ollama -f --no-pager'
-            ])
-        except KeyboardInterrupt:
-            print("\nLog viewing stopped.")
-        except subprocess.CalledProcessError as e:
-            print(f"Error accessing logs: {e}")
-            print("Make sure the instance is running and SSH config is set up.")
+        self.spotman.show_service_logs(instance_identifier, "ollama")
 
 
 def format_ollama_instances_table(instances: List[Dict]) -> None:
     """Format and print Ollama instances in a table."""
-    if not instances:
-        print("No Ollama instances found.")
-        return
-    
-    print(f"\nOllama LLM Instances:")
-    headers = ['Name', 'Instance ID', 'Type', 'State', 'Public IP', 'Launch Time']
-    
-    # Calculate column widths
-    widths = [len(h) for h in headers]
-    for instance in instances:
-        widths[0] = max(widths[0], len(instance['Name']))
-        widths[1] = max(widths[1], len(instance['InstanceId']))
-        widths[2] = max(widths[2], len(instance['InstanceType']))
-        widths[3] = max(widths[3], len(instance['State']))
-        widths[4] = max(widths[4], len(instance['PublicIpAddress']))
-        widths[5] = max(widths[5], 19)  # For timestamp display
-    
-    # Print header
-    header_line = ' | '.join(h.ljust(w) for h, w in zip(headers, widths))
-    print(header_line)
-    print('-' * len(header_line))
-    
-    # Print instances
-    for instance in instances:
-        launch_time = instance['LaunchTime'].strftime('%Y-%m-%d %H:%M:%S') if instance['LaunchTime'] else 'N/A'
-        row = [
-            instance['Name'].ljust(widths[0]),
-            instance['InstanceId'].ljust(widths[1]),
-            instance['InstanceType'].ljust(widths[2]),
-            instance['State'].ljust(widths[3]),
-            instance['PublicIpAddress'].ljust(widths[4]),
-            launch_time.ljust(widths[5])
-        ]
-        print(' | '.join(row))
-    
-    print(f"\nTotal: {len(instances)} Ollama instance(s)")
-    
-    # Show connection info for running instances
-    running_instances = [i for i in instances if i['State'] == 'running']
-    if running_instances:
-        print("\n📡 Connection Commands:")
-        for instance in running_instances:
-            name = instance['Name'] if instance['Name'] != 'N/A' else instance['InstanceId']
-            print(f"   ssh {name}  # Connect with port forwarding")
-        print("\n🌐 Ollama API: http://localhost:11434 (when connected via SSH)")
+    # Use the generic table formatter from spotman_core with Ollama-specific parameters
+    from spotman_core import AWSInstanceManager
+    manager = AWSInstanceManager()  # Just for accessing the method
+    manager.format_instances_table(instances, "Ollama LLM", [11434], "Ollama")
 
 
 def main():
@@ -305,12 +254,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s create --name ollama01                    # Create new Ollama instance
+  %(prog)s list-profiles                             # Show available instance profiles
+  %(prog)s create --name ollama01                    # Create with default GPU profile
+  %(prog)s create --profile ollama-cpu-budget       # Create budget CPU instance
+  %(prog)s create --profile ollama-gpu-premium      # Create premium GPU instance  
   %(prog)s create --name ollama-gpu --type g5.xlarge # Create with specific instance type
   %(prog)s list                                      # List all Ollama instances
   %(prog)s start ollama01                           # Start/resume Ollama instance
-  %(prog)s stop ollama01                            # Hibernate Ollama instance
-  %(prog)s stop ollama01 --no-hibernate             # Stop without hibernation
+  %(prog)s stop ollama01                            # Stop Ollama instance
   %(prog)s status ollama01                          # Show instance status
   %(prog)s connect ollama01                         # SSH connect with port forwarding
   %(prog)s test ollama01                            # Test Ollama API connection
@@ -328,11 +279,15 @@ Examples:
     # Create command
     create_parser = subparsers.add_parser('create', help='Create a new Ollama instance')
     create_parser.add_argument('--name', help='Instance name (auto-generated if not specified)')
-    create_parser.add_argument('--type', help='Instance type (default: g5.xlarge)')
+    create_parser.add_argument('--type', help='Instance type (e.g., g5.xlarge, m5.large)')
+    create_parser.add_argument('--profile', help='Profile to use (ollama-gpu-standard, ollama-cpu-budget, etc.)')
     create_parser.add_argument('--no-spot', action='store_true', help='Use on-demand instead of spot')
     
     # List command
     list_parser = subparsers.add_parser('list', help='List all Ollama instances')
+    
+    # List profiles command
+    profiles_parser = subparsers.add_parser('list-profiles', help='List available Ollama profiles')
     
     # Start command
     start_parser = subparsers.add_parser('start', help='Start/resume an Ollama instance')
@@ -383,12 +338,16 @@ Examples:
         manager.create_ollama_instance(
             name=args.name, 
             instance_type=args.type,
-            spot=not args.no_spot
+            spot=not args.no_spot,
+            profile=args.profile
         )
     
     elif args.command == 'list':
         instances = manager.list_ollama_instances()
         format_ollama_instances_table(instances)
+    
+    elif args.command == 'list-profiles':
+        manager.list_ollama_profiles()
     
     elif args.command == 'start':
         manager.start_ollama_instance(args.instance)

@@ -24,7 +24,15 @@ apt-get update && apt-get upgrade -y
 
 # Install prerequisite packages
 echo "Installing prerequisite packages..."
-apt-get install -y curl wget htop iotop awscli jq pm-utils uswsusp hibernate
+apt-get install -y curl wget htop iotop jq pm-utils
+
+# Install AWS CLI v2
+echo "Installing AWS CLI v2..."
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+apt-get install -y unzip
+unzip awscliv2.zip
+./aws/install
+rm -rf awscliv2.zip aws/
 
 # Configure swap for hibernation (hibernation requires swap >= RAM)
 echo "Configuring swap space for hibernation..."

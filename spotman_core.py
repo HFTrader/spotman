@@ -312,11 +312,12 @@ class AWSInstanceManager:
         return None
     
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
-    def _get_latest_ami(self, os_type: str) -> str:
+    def _get_latest_ami(self, os_type: str, ami_name_pattern: str = None) -> str:
         """Get the latest AMI ID for the specified OS type.
         
         Args:
             os_type: Operating system type ('ubuntu', 'amazon-linux', 'centos', etc.)
+            ami_name_pattern: Custom AMI name pattern to search for
             
         Returns:
             AMI ID string
@@ -325,18 +326,33 @@ class AWSInstanceManager:
             ValueError: If OS type is not supported
             ClientError: If AWS API call fails
         """
-        # AMI filters for different OS types
-        ami_filters = {
-            'ubuntu': {
-                'Filters': [
-                    {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*']},
-                    {'Name': 'owner-id', 'Values': ['099720109477']},  # Canonical
-                    {'Name': 'state', 'Values': ['available']},
-                    {'Name': 'architecture', 'Values': ['x86_64']},
-                    {'Name': 'virtualization-type', 'Values': ['hvm']},
-                    {'Name': 'root-device-type', 'Values': ['ebs']}
-                ]
-            },
+        # Use custom pattern if provided
+        if ami_name_pattern and os_type == 'ubuntu':
+            ami_filters = {
+                'ubuntu': {
+                    'Filters': [
+                        {'Name': 'name', 'Values': [ami_name_pattern]},
+                        {'Name': 'owner-id', 'Values': ['099720109477']},  # Canonical
+                        {'Name': 'state', 'Values': ['available']},
+                        {'Name': 'architecture', 'Values': ['x86_64']},
+                        {'Name': 'virtualization-type', 'Values': ['hvm']},
+                        {'Name': 'root-device-type', 'Values': ['ebs']}
+                    ]
+                }
+            }
+        else:
+            # AMI filters for different OS types
+            ami_filters = {
+                'ubuntu': {
+                    'Filters': [
+                        {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*']},
+                        {'Name': 'owner-id', 'Values': ['099720109477']},  # Canonical
+                        {'Name': 'state', 'Values': ['available']},
+                        {'Name': 'architecture', 'Values': ['x86_64']},
+                        {'Name': 'virtualization-type', 'Values': ['hvm']},
+                        {'Name': 'root-device-type', 'Values': ['ebs']}
+                    ]
+                },
             'amazon-linux': {
                 'Filters': [
                     {'Name': 'name', 'Values': ['amzn2-ami-hvm-*-x86_64-gp2']},
@@ -666,6 +682,7 @@ class AWSInstanceManager:
             hibernation_enabled = profile.get('hibernation_enabled', False)
             root_volume_size = profile.get('root_volume_size', 8)
             root_volume_type = profile.get('root_volume_type', 'gp3')
+            root_volume_encrypted = profile.get('root_volume_encrypted', False)
             update_os = profile.get('update_os', False)
             
             # Override spot price if provided
@@ -674,7 +691,8 @@ class AWSInstanceManager:
             
             # Get AMI ID if not specified
             if not ami_id:
-                ami_id = self._get_latest_ami(os_type)
+                ami_name_pattern = profile.get('ami_name')
+                ami_id = self._get_latest_ami(os_type, ami_name_pattern)
             
             # Get default subnet if not specified
             if not subnet_id:
@@ -700,7 +718,7 @@ class AWSInstanceManager:
                         'VolumeSize': root_volume_size,
                         'VolumeType': root_volume_type,
                         'DeleteOnTermination': True,
-                        'Encrypted': False
+                        'Encrypted': root_volume_encrypted
                     }
                 }
             ]
@@ -768,8 +786,6 @@ class AWSInstanceManager:
                 run_params['SubnetId'] = subnet_id
             if encoded_user_data:
                 run_params['UserData'] = encoded_user_data
-            if hibernation_enabled:
-                run_params['HibernateOptions'] = {'Configured': True}
             
             # Handle spot instances
             if spot_instance:
@@ -779,10 +795,14 @@ class AWSInstanceManager:
                     'MarketType': 'spot',
                     'SpotOptions': {
                         'MaxPrice': str(spot_price),
-                        'SpotInstanceType': 'one-time',
+                        'SpotInstanceType': 'persistent' if hibernation_enabled else 'one-time',
                         'InstanceInterruptionBehavior': 'hibernate' if hibernation_enabled else 'terminate'
                     }
                 }
+            
+            # Set HibernationOptions for hibernation (works for both spot and on-demand)
+            if hibernation_enabled:
+                run_params['HibernationOptions'] = {'Configured': True}
             
             if dry_run:
                 print("Dry run successful. Instance parameters are valid.")
@@ -838,13 +858,14 @@ class AWSInstanceManager:
     
     @AWSErrorHandler.retry_on_aws_error(max_retries=2, delay=1.0)
     def list_instances(self, app_class: str = None, state: str = None, 
-                      profile_name: str = None) -> List[Dict]:
+                      profile_name: str = None, all_instances: bool = False) -> List[Dict]:
         """List EC2 instances with optional filtering.
         
         Args:
             app_class: Filter by application class
             state: Filter by instance state
             profile_name: Filter by profile name
+            all_instances: If True, show all instances, not just spotman-created ones
             
         Returns:
             List of instance dictionaries
@@ -859,8 +880,9 @@ class AWSInstanceManager:
             if profile_name:
                 filters.append({'Name': 'tag:Profile', 'Values': [profile_name]})
             
-            # Always filter for instances created by SpotMan
-            filters.append({'Name': 'tag:CreatedBy', 'Values': ['spotman']})
+            # Only filter for spotman instances if not showing all instances
+            if not all_instances:
+                filters.append({'Name': 'tag:CreatedBy', 'Values': ['spotman']})
             
             response = self.ec2_client.describe_instances(Filters=filters)
             
@@ -1063,6 +1085,230 @@ class AWSInstanceManager:
             print(f"Error resuming instance: {e}")
             return False
     
+    def connect_to_instance(self, instance_identifier: str, ports: List[int] = None, service_name: str = None) -> None:
+        """Connect to instance via SSH with optional port forwarding.
+        
+        Args:
+            instance_identifier: Instance name or ID
+            ports: List of ports to forward (e.g., [11434, 8080])
+            service_name: Name of service for display purposes
+        """
+        instance_id = self._resolve_instance_identifier(instance_identifier)
+        if not instance_id:
+            return
+        
+        try:
+            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
+            instance = response['Reservations'][0]['Instances'][0]
+            
+            if instance['State']['Name'] != 'running':
+                print(f"Instance {instance_identifier} is not running. Current state: {instance['State']['Name']}")
+                print("Use 'start' command to start the instance first.")
+                return
+            
+            public_ip = instance.get('PublicIpAddress')
+            if not public_ip:
+                print("Instance has no public IP address.")
+                return
+            
+            # Get SSH key
+            key_name = instance.get('KeyName')
+            identity_file = "~/.ssh/your-key.pem"  # Default fallback
+            
+            if key_name and self.regions_config and 'ssh_keys' in self.regions_config:
+                ssh_keys = self.regions_config['ssh_keys']
+                if key_name in ssh_keys:
+                    identity_file = ssh_keys[key_name]
+            
+            # Check if SSH config entry exists
+            ssh_config_path = self._get_spotman_ssh_config_path()
+            host_name = instance_identifier if not instance_identifier.startswith('i-') else f"spotman-{instance_id}"
+            
+            if self._check_ssh_config_exists(host_name, ssh_config_path):
+                if ports:
+                    port_info = ", ".join(str(p) for p in ports)
+                    if service_name:
+                        print(f"Connecting to {host_name} with {service_name} port forwarding...")
+                        print(f"{service_name} will be available at: http://localhost:{ports[0]}" if ports else "")
+                    else:
+                        print(f"Connecting to {host_name} with port forwarding: {port_info}")
+                else:
+                    print(f"Connecting to {host_name}...")
+                
+                print(f"Press Ctrl+C to disconnect")
+                subprocess.run(['ssh', host_name])
+            else:
+                print(f"SSH config not found. Connecting directly...")
+                
+                ssh_cmd = [
+                    'ssh', '-i', os.path.expanduser(identity_file),
+                    '-o', 'StrictHostKeyChecking=no',
+                    f'ubuntu@{public_ip}'
+                ]
+                
+                if ports:
+                    for port in ports:
+                        ssh_cmd.extend(['-L', f'{port}:localhost:{port}'])
+                    port_info = ", ".join(str(p) for p in ports)
+                    print(f"Port forwarding: {port_info}")
+                    if service_name and ports:
+                        print(f"{service_name} will be available at: http://localhost:{ports[0]}")
+                
+                print(f"Press Ctrl+C to disconnect")
+                subprocess.run(ssh_cmd)
+        
+        except ClientError as e:
+            print(f"Error connecting to instance: {e}")
+    
+    def test_service_connection(self, instance_identifier: str, local_port: int, 
+                              health_endpoint: str = None, service_name: str = None) -> bool:
+        """Test if a service is accessible via port forwarding.
+        
+        Args:
+            instance_identifier: Instance name or ID (for display purposes)
+            local_port: Local port to test
+            health_endpoint: HTTP endpoint to test (e.g., '/api/version')
+            service_name: Name of service for display purposes
+            
+        Returns:
+            True if service is accessible, False otherwise
+        """
+        import socket
+        
+        service_display = service_name or "service"
+        
+        # Check if local port is being forwarded
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            result = sock.connect_ex(('localhost', local_port))
+            sock.close()
+            
+            if result != 0:
+                print(f"Port {local_port} is not open locally.")
+                print(f"Make sure you're connected to {instance_identifier} with SSH port forwarding.")
+                return False
+            
+            # Test HTTP endpoint if provided
+            if health_endpoint:
+                try:
+                    import requests
+                    url = f'http://localhost:{local_port}{health_endpoint}'
+                    response = requests.get(url, timeout=5)
+                    if response.status_code == 200:
+                        print(f"✅ {service_display} connection successful!")
+                        try:
+                            if response.headers.get('content-type', '').startswith('application/json'):
+                                data = response.json()
+                                if 'version' in data:
+                                    print(f"   Version: {data['version']}")
+                        except:
+                            pass
+                        return True
+                    else:
+                        print(f"❌ {service_display} API returned status code: {response.status_code}")
+                        return False
+                except ImportError:
+                    print(f"✅ Port {local_port} is accessible (HTTP testing requires 'requests' library)")
+                    return True
+                except Exception as e:
+                    print(f"❌ {service_display} API connection failed: {e}")
+                    return False
+            else:
+                print(f"✅ Port {local_port} is accessible")
+                return True
+                
+        except Exception as e:
+            print(f"❌ Connection test failed: {e}")
+            return False
+    
+    def show_service_logs(self, instance_identifier: str, service_name: str, follow: bool = True) -> None:
+        """Show systemd service logs from the instance via SSH.
+        
+        Args:
+            instance_identifier: Instance name or ID
+            service_name: systemd service name
+            follow: Whether to follow logs (tail -f behavior)
+        """
+        host_name = instance_identifier if not instance_identifier.startswith('i-') else f"spotman-{instance_identifier}"
+        
+        follow_flag = '-f' if follow else ''
+        print(f"Showing {service_name} logs from {host_name}...")
+        if follow:
+            print("Press Ctrl+C to exit")
+        
+        try:
+            cmd = ['ssh', host_name, f'sudo journalctl -u {service_name} {follow_flag} --no-pager']
+            subprocess.run(cmd)
+        except KeyboardInterrupt:
+            if follow:
+                print("\nLog viewing stopped.")
+        except subprocess.CalledProcessError as e:
+            print(f"Error accessing logs: {e}")
+            print("Make sure the instance is running and SSH config is set up.")
+    
+    def format_instances_table(self, instances: List[Dict], app_class: str = None, 
+                             connection_ports: List[int] = None, service_name: str = None) -> None:
+        """Format and print instances in a table with connection info.
+        
+        Args:
+            instances: List of instance dictionaries
+            app_class: Application class for display purposes
+            connection_ports: Ports that are forwarded for this service
+            service_name: Name of service for display purposes
+        """
+        if not instances:
+            class_display = f"{app_class} " if app_class else ""
+            print(f"No {class_display}instances found.")
+            return
+        
+        class_display = f"{app_class.title()} " if app_class else ""
+        service_display = service_name or app_class or "Service"
+        
+        print(f"\n{class_display}Instances:")
+        headers = ['Name', 'Instance ID', 'Type', 'State', 'Public IP', 'Launch Time']
+        
+        # Calculate column widths
+        widths = [len(h) for h in headers]
+        for instance in instances:
+            widths[0] = max(widths[0], len(instance['Name']))
+            widths[1] = max(widths[1], len(instance['InstanceId']))
+            widths[2] = max(widths[2], len(instance['InstanceType']))
+            widths[3] = max(widths[3], len(instance['State']))
+            widths[4] = max(widths[4], len(instance['PublicIpAddress']))
+            widths[5] = max(widths[5], 19)  # For timestamp display
+        
+        # Print header
+        header_line = ' | '.join(h.ljust(w) for h, w in zip(headers, widths))
+        print(header_line)
+        print('-' * len(header_line))
+        
+        # Print instances
+        for instance in instances:
+            launch_time = instance['LaunchTime'].strftime('%Y-%m-%d %H:%M:%S') if instance['LaunchTime'] else 'N/A'
+            row = [
+                instance['Name'].ljust(widths[0]),
+                instance['InstanceId'].ljust(widths[1]),
+                instance['InstanceType'].ljust(widths[2]),
+                instance['State'].ljust(widths[3]),
+                instance['PublicIpAddress'].ljust(widths[4]),
+                launch_time.ljust(widths[5])
+            ]
+            print(' | '.join(row))
+        
+        print(f"\nTotal: {len(instances)} {class_display.lower()}instance(s)")
+        
+        # Show connection info for running instances
+        running_instances = [i for i in instances if i['State'] == 'running']
+        if running_instances:
+            print("\n📡 Connection Commands:")
+            for instance in running_instances:
+                name = instance['Name'] if instance['Name'] != 'N/A' else instance['InstanceId']
+                print(f"   ssh {name}  # Connect with port forwarding")
+            
+            if connection_ports and service_name:
+                port_display = connection_ports[0] if len(connection_ports) == 1 else f"{connection_ports[0]} (primary)"
+                print(f"\n🌐 {service_display} API: http://localhost:{port_display} (when connected via SSH)")
+
     def check_hibernation_status(self, instance_identifier: str) -> None:
         """Check and display hibernation status of an instance.
         

@@ -1,0 +1,46 @@
+# Ollama LLM Server on High-End CPU Instance Profile  
+# CPU-optimized for larger models without GPU requirements
+# Good for larger models (33B+ parameters) on high-core-count CPU
+
+# Instance configuration - High-performance CPU
+instance_type: "c5.4xlarge"  # 16 vCPU, 32GB RAM - high performance CPU
+spot_instance: true  # Cost-effective spot pricing
+spot_price: 0.40  # Higher bid for performance instance
+hibernation_enabled: false  # Simplified management
+
+# Storage configuration - adequate for larger models
+root_volume_size: 150  # GB - space for larger models
+root_volume_type: "gp3"  # Fast storage for model loading
+root_volume_encrypted: false  # No encryption overhead
+
+# Operating system configuration
+os_type: "ubuntu"
+ami_id: "ami-0ea3c35c5c3284d82"  # Ubuntu 24.04 LTS (Noble) in us-east-2
+update_os: true  # Keep system current
+
+# SSH key configuration
+key_name: "amz-ohio"  # SSH key for us-east-2 region
+
+# SSH port forwarding configuration
+ssh_port_forwards:
+  - local_port: 11434     # Local port to forward
+    remote_port: 11434    # Remote port (Ollama API)
+    remote_host: localhost
+
+# Ollama-specific setup script
+user_data: !include ../scripts/ollama-setup.sh
+
+# Tags for Ollama LLM server instances
+tags:
+  ApplicationClass: "ollama"
+  Environment: "production" 
+  InstanceType: "cpu-performance"
+  HibernationEnabled: "false"
+  Purpose: "LLM-server-cpu-performance"
+  ManagedBy: "spotman"
+  Service: "ollama"
+  
+# Note: High-performance CPU instance for larger models without GPU
+# Best for: 33B+ models, CPU-only inference, high throughput
+# Cost: ~$60-120/month with spot pricing
+# Performance: 5-20 tokens/second for large models

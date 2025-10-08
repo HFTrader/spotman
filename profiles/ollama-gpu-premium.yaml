@@ -1,0 +1,46 @@
+# Ollama LLM Server on High-End GPU Instance Profile
+# Maximum performance GPU instance for the largest models
+# NVIDIA A10G with 24GB VRAM for 70B+ parameter models
+
+# Instance configuration - Maximum GPU performance
+instance_type: "g5.2xlarge"  # NVIDIA A10G 24GB VRAM, 8 vCPU, 32GB RAM
+spot_instance: true  # Cost-effective spot pricing
+spot_price: 1.20  # Higher bid for premium GPU instance
+hibernation_enabled: false  # Simplified management
+
+# Storage configuration - large for biggest models
+root_volume_size: 200  # GB - space for largest models
+root_volume_type: "gp3"  # Fast storage for model loading
+root_volume_encrypted: false  # No encryption overhead
+
+# Operating system configuration
+os_type: "ubuntu"
+ami_id: "ami-0ea3c35c5c3284d82"  # Ubuntu 24.04 LTS (Noble) in us-east-2
+update_os: true  # Keep system current
+
+# SSH key configuration
+key_name: "amz-ohio"  # SSH key for us-east-2 region
+
+# SSH port forwarding configuration
+ssh_port_forwards:
+  - local_port: 11434     # Local port to forward
+    remote_port: 11434    # Remote port (Ollama API)
+    remote_host: localhost
+
+# Ollama-specific setup script
+user_data: !include ../scripts/ollama-setup.sh
+
+# Tags for Ollama LLM server instances
+tags:
+  ApplicationClass: "ollama"
+  Environment: "production" 
+  InstanceType: "gpu-premium"
+  HibernationEnabled: "false"
+  Purpose: "LLM-server-gpu-premium"
+  ManagedBy: "spotman"
+  Service: "ollama"
+  
+# Note: Premium GPU instance for maximum performance
+# Best for: 70B+ models, fastest inference, production workloads
+# Cost: ~$200-400/month with spot pricing
+# Performance: 30-100+ tokens/second depending on model

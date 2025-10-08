@@ -1,0 +1,46 @@
+# Ollama LLM Server on Budget CPU Instance Profile
+# Cost-optimized for basic LLM workloads with CPU-only inference
+# Good for smaller models (7B-13B parameters) and development/testing
+
+# Instance configuration - CPU optimized for cost
+instance_type: "m5.large"  # 2 vCPU, 8GB RAM - cost effective
+spot_instance: true  # Cost-effective spot pricing
+spot_price: 0.20  # Conservative bid for availability
+hibernation_enabled: false  # Simplified management
+
+# Storage configuration - minimal for basic usage
+root_volume_size: 50  # GB - space for smaller models
+root_volume_type: "gp3"  # Standard fast storage
+root_volume_encrypted: false  # No encryption overhead
+
+# Operating system configuration
+os_type: "ubuntu"
+ami_id: "ami-0ea3c35c5c3284d82"  # Ubuntu 24.04 LTS (Noble) in us-east-2
+update_os: true  # Keep system current
+
+# SSH key configuration
+key_name: "amz-ohio"  # SSH key for us-east-2 region
+
+# SSH port forwarding configuration
+ssh_port_forwards:
+  - local_port: 11434     # Local port to forward
+    remote_port: 11434    # Remote port (Ollama API)
+    remote_host: localhost
+
+# Ollama-specific setup script
+user_data: !include ../scripts/ollama-setup.sh
+
+# Tags for Ollama LLM server instances
+tags:
+  ApplicationClass: "ollama"
+  Environment: "development" 
+  InstanceType: "cpu-budget"
+  HibernationEnabled: "false"
+  Purpose: "LLM-server-budget"
+  ManagedBy: "spotman"
+  Service: "ollama"
+  
+# Note: Budget CPU instance for development and smaller models
+# Best for: 7B models, development, testing, light usage
+# Cost: ~$15-30/month with spot pricing
+# Performance: 2-8 tokens/second depending on model size

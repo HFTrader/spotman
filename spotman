@@ -138,6 +138,7 @@ Examples:
     list_parser.add_argument('--class', help='Filter by application class')
     list_parser.add_argument('--state', help='Filter by state')
     list_parser.add_argument('--profile', help='Filter by profile')
+    list_parser.add_argument('--all', action='store_true', help='Show all instances, not just spotman-created ones')
     
     # Start command
     start_parser = subparsers.add_parser('start', help='Start an instance')
@@ -207,7 +208,8 @@ Examples:
         instances = manager.list_instances(
             app_class=app_class,
             state=args.state,
-            profile_name=args.profile
+            profile_name=args.profile,
+            all_instances=args.all
         )
         format_instances_table(instances)
     
