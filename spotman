@@ -195,16 +195,16 @@ Examples:
     # List profiles command
     profiles_parser = subparsers.add_parser('list-profiles', help='List available profiles')
 
-    # Spot status command
-    spot_status_parser = subparsers.add_parser('spot-status', help='Show spot instance status and interruption info')
-    spot_status_parser.add_argument('instance', help='Instance name or ID')
+    # Status command (spot instance status and interruption info)
+    status_parser2 = subparsers.add_parser('status', help='Show spot instance status and interruption info')
+    status_parser2.add_argument('instance', help='Instance name or ID')
 
-    # Spot price command
-    spot_price_parser = subparsers.add_parser('spot-price', help='Show current spot prices')
-    spot_price_parser.add_argument('--profile', help='Get price for instance type in profile')
-    spot_price_parser.add_argument('--instance-type', action='append', dest='instance_types',
-                                   help='Instance type(s) to query (can be repeated)')
-    spot_price_parser.add_argument('--az', help='Specific availability zone')
+    # Price command (current spot prices)
+    price_parser = subparsers.add_parser('price', help='Show current spot prices')
+    price_parser.add_argument('--profile', help='Get price for instance type in profile')
+    price_parser.add_argument('--instance-type', action='append', dest='instance_types',
+                              help='Instance type(s) to query (can be repeated)')
+    price_parser.add_argument('--az', help='Specific availability zone')
 
     args = parser.parse_args()
     
@@ -304,10 +304,10 @@ Examples:
         profiles = manager.list_profiles()
         format_profiles_table(profiles, manager)
 
-    elif args.command == 'spot-status':
+    elif args.command == 'status':
         manager.get_spot_instance_status(args.instance)
 
-    elif args.command == 'spot-price':
+    elif args.command == 'price':
         instance_types_queried = []
 
         # Determine instance types to query
