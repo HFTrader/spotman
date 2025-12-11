@@ -1,0 +1,36 @@
+# Algorithmica Validation - AMD Zen 4 (c7a.4xlarge)
+# Modern AMD target for hardware evolution experiments
+# 16 vCPUs, 32 GB RAM, AVX2, DDR5
+
+# Instance configuration
+instance_type: "c7a.4xlarge"
+spot_instance: true
+spot_price: "0.85"  # Slightly above on-demand ($0.77) for availability
+
+# Storage configuration
+root_volume_size: 30  # GB - space for experiments and results
+root_volume_type: "gp3"
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true
+
+# Tags for algorithmica experiments
+tags:
+  ApplicationClass: "algorithmica"
+  Environment: "experiment"
+  InstanceType: "spot"
+  Purpose: "hardware-validation"
+  Architecture: "zen4"
+  Year: "2023"
+  ManagedBy: "spotman"
+
+# Notes:
+# - AMD EPYC 9R14 (Zen 4)
+# - 32 KB L1d, 1 MB L2, 32 MB L3 per CCX
+# - AVX2 support with FMA
+# - DDR5 memory
+# - Direct AMD evolution comparison (Zen 2 -> Zen 4)
+#
+# Usage:
+#   ./spotman create --profile algorithmica-c7a --name c7a-exp01 --class algorithmica

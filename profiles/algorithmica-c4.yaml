@@ -1,0 +1,36 @@
+# Algorithmica Validation - Intel Haswell (c4.xlarge)
+# Old baseline for hardware evolution experiments
+# 4 vCPUs, 7.5 GB RAM, AVX2, DDR3
+
+# Instance configuration
+instance_type: "c4.xlarge"
+spot_instance: true
+spot_price: "0.25"  # Slightly above on-demand ($0.199) for availability
+
+# Storage configuration
+root_volume_size: 20  # GB - sufficient for experiments
+root_volume_type: "gp3"
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true
+
+# Tags for algorithmica experiments
+tags:
+  ApplicationClass: "algorithmica"
+  Environment: "experiment"
+  InstanceType: "spot"
+  Purpose: "hardware-validation"
+  Architecture: "haswell"
+  Year: "2013"
+  ManagedBy: "spotman"
+
+# Notes:
+# - Intel Xeon E5-2666 v3 (Haswell)
+# - 32 KB L1d, 256 KB L2, 25 MB L3 shared
+# - AVX2 support (no FMA)
+# - DDR3 memory
+# - Old baseline - shows pre-Algorithmica hardware state
+#
+# Usage:
+#   ./spotman create --profile algorithmica-c4 --name c4-exp01 --class algorithmica

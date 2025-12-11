@@ -1,0 +1,36 @@
+# Algorithmica Validation - Intel Sapphire Rapids (c7i.4xlarge)
+# Modern Intel target for hardware evolution experiments
+# 16 vCPUs, 32 GB RAM, AVX-512, DDR5
+
+# Instance configuration
+instance_type: "c7i.4xlarge"
+spot_instance: true
+spot_price: "0.90"  # Slightly above on-demand ($0.85) for availability
+
+# Storage configuration
+root_volume_size: 30  # GB - space for experiments and results
+root_volume_type: "gp3"
+
+# Operating system configuration
+os_type: "ubuntu"
+update_os: true
+
+# Tags for algorithmica experiments
+tags:
+  ApplicationClass: "algorithmica"
+  Environment: "experiment"
+  InstanceType: "spot"
+  Purpose: "hardware-validation"
+  Architecture: "sapphire-rapids"
+  Year: "2023"
+  ManagedBy: "spotman"
+
+# Notes:
+# - Intel Xeon Platinum 8488C (Sapphire Rapids)
+# - 48 KB L1d, 2 MB L2, 105 MB L3 shared
+# - AVX-512 support with FMA
+# - DDR5 memory
+# - Primary modern comparison point for Algorithmica validation
+#
+# Usage:
+#   ./spotman create --profile algorithmica-c7i --name c7i-exp01 --class algorithmica
