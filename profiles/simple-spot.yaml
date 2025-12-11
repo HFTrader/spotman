@@ -16,7 +16,7 @@ os_type: "ubuntu"
 update_os: true  # Keep system current
 
 # Enhanced user data for development environment
-user_data: !include scripts/simple-spot-setup.sh
+user_data: !include ../scripts/simple-spot-setup.sh
 
 # Tags for simple spot instances
 tags:

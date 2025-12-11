@@ -16,7 +16,7 @@ os_type: "ubuntu"
 update_os: true  # Keep test instances updated
 
 # Simple user data for testing using external script
-user_data: !include scripts/test-setup.sh
+user_data: !include ../scripts/test-setup.sh
 
 # Tags for test instances
 tags:

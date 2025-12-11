@@ -22,7 +22,7 @@ ssh_port_forwards:
     remote_host: localhost
 
 # User data script - references external script file using native YAML include
-user_data: !include scripts/webserver-setup.sh
+user_data: !include ../scripts/webserver-setup.sh
 
 # Tags for multi-region web server
 tags:

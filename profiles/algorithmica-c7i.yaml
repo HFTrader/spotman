@@ -5,11 +5,12 @@
 # Instance configuration
 instance_type: "c7i.4xlarge"
 spot_instance: true
-spot_price: "0.90"  # Slightly above on-demand ($0.85) for availability
+hibernation_enabled: true
 
 # Storage configuration
 root_volume_size: 30  # GB - space for experiments and results
 root_volume_type: "gp3"
+root_volume_encrypted: true  # Required for hibernation
 
 # Operating system configuration
 os_type: "ubuntu"

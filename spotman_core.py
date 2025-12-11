@@ -145,7 +145,7 @@ class AWSErrorHandler:
 
 class IncludeLoader(yaml.SafeLoader):
     """YAML loader that supports !include directive for external files."""
-    
+
     def __init__(self, stream):
         try:
             self._root = os.path.split(stream.name)[0]
@@ -156,11 +156,11 @@ class IncludeLoader(yaml.SafeLoader):
     def include(self, node):
         """Handle !include directive in YAML files."""
         filename = self.construct_scalar(node)
-        
+
         # Support both relative and absolute paths
         if not os.path.isabs(filename):
             filename = os.path.join(self._root, filename)
-        
+
         try:
             with open(filename, 'r') as f:
                 return f.read()
@@ -178,16 +178,17 @@ IncludeLoader.add_constructor('!include', IncludeLoader.include)
 class AWSInstanceManager:
     """Manages AWS EC2 instances with application class tagging."""
     
-    def __init__(self, region: str = None, profile: str = None):
+    def __init__(self, region: str = None, profile: str = None, quiet: bool = False):
         """Initialize the AWS Instance Manager.
-        
+
         Args:
             region: AWS region to use. If None, uses default region from AWS config.
             profile: AWS profile to use. If None, uses default profile.
+            quiet: If True, suppress informational messages.
         """
         self.session = boto3.Session(profile_name=profile) if profile else boto3.Session()
         self.region = region or self.session.region_name or 'us-east-1'
-        
+
         try:
             self.ec2_client = self.session.client('ec2', region_name=self.region)
             self.ec2 = self.session.resource('ec2', region_name=self.region)
@@ -195,12 +196,13 @@ class AWSInstanceManager:
             print(f"Error initializing AWS clients: {e}")
             print("Please check your AWS credentials and configuration.")
             sys.exit(1)
-        
+
         # Load configuration files
         self.config = self._load_config()
         self.regions_config = self._load_regions_config()
-        
-        print(f"Using AWS region: {self.region}")
+
+        if not quiet:
+            print(f"Using AWS region: {self.region}")
     
     def _load_config(self) -> Dict:
         """Load SpotMan configuration."""
@@ -232,19 +234,19 @@ class AWSInstanceManager:
     
     def get_profile(self, profile_name: str) -> Optional[Dict]:
         """Load and return a profile configuration.
-        
+
         Args:
             profile_name: Name of the profile to load
-            
+
         Returns:
             Profile configuration dictionary or None if not found
         """
         script_dir = os.path.dirname(os.path.abspath(__file__))
         profile_path = os.path.join(script_dir, 'profiles', f'{profile_name}.yaml')
-        
+
         if not os.path.exists(profile_path):
             return None
-        
+
         try:
             with open(profile_path, 'r') as f:
                 return yaml.load(f, Loader=IncludeLoader)
@@ -292,7 +294,131 @@ class AWSInstanceManager:
                 profiles.append(file.rsplit('.', 1)[0])
         
         return sorted(profiles)
-    
+
+    @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
+    def get_spot_prices(self, instance_types: List[str], availability_zone: str = None) -> List[Dict]:
+        """Get current spot prices for specified instance types.
+
+        Args:
+            instance_types: List of instance types to query (e.g., ['c7i.4xlarge', 'c7a.4xlarge'])
+            availability_zone: Specific AZ to query (optional, queries all AZs in region if not specified)
+
+        Returns:
+            List of dicts with instance_type, availability_zone, spot_price, and timestamp
+        """
+        from datetime import datetime, timezone
+
+        try:
+            params = {
+                'InstanceTypes': instance_types,
+                'ProductDescriptions': ['Linux/UNIX'],
+                'MaxResults': 100
+            }
+
+            if availability_zone:
+                params['AvailabilityZone'] = availability_zone
+
+            response = self.ec2_client.describe_spot_price_history(**params)
+
+            # Get only the most recent price per instance type per AZ
+            latest_prices = {}
+            for item in response.get('SpotPriceHistory', []):
+                key = (item['InstanceType'], item['AvailabilityZone'])
+                if key not in latest_prices:
+                    latest_prices[key] = {
+                        'instance_type': item['InstanceType'],
+                        'availability_zone': item['AvailabilityZone'],
+                        'spot_price': float(item['SpotPrice']),
+                        'timestamp': item['Timestamp']
+                    }
+
+            return sorted(latest_prices.values(), key=lambda x: (x['instance_type'], x['availability_zone']))
+
+        except ClientError as e:
+            print(f"Error getting spot prices: {e}")
+            return []
+
+    def get_spot_capacity_scores(self, instance_types: List[str], target_capacity: int = 5,
+                                  single_az: bool = True) -> Dict[str, int]:
+        """Get spot placement scores for instance types across availability zones.
+
+        The Spot placement score is 1-10, where 10 means highly likely to get capacity.
+
+        Note: AWS recommends using at least 3 instance types for meaningful scores, but
+        we query with just the requested types to get accurate capacity info for those
+        specific types. A target_capacity of 5 gives more realistic scores than 1.
+
+        Args:
+            instance_types: List of instance types to query
+            target_capacity: Target capacity (number of instances) to request. Default 5
+                           gives more realistic differentiation than 1.
+            single_az: If True, get scores per AZ; if False, get regional scores
+
+        Returns:
+            Dict mapping availability_zone (or region) to score (1-10)
+        """
+        try:
+            # Query with exactly the instance types requested
+            # Using more than 1 target_capacity gives more realistic scores
+            params = {
+                'InstanceTypes': instance_types[:10],  # API limit is 10
+                'TargetCapacity': target_capacity,
+                'SingleAvailabilityZone': single_az,
+                'RegionNames': [self.region]
+            }
+
+            response = self.ec2_client.get_spot_placement_scores(**params)
+
+            scores = {}
+            for item in response.get('SpotPlacementScores', []):
+                if single_az and 'AvailabilityZoneId' in item:
+                    # Map AZ ID to AZ name
+                    az_id = item['AvailabilityZoneId']
+                    # Get AZ name from ID
+                    try:
+                        az_response = self.ec2_client.describe_availability_zones(
+                            ZoneIds=[az_id]
+                        )
+                        if az_response['AvailabilityZones']:
+                            az_name = az_response['AvailabilityZones'][0]['ZoneName']
+                            scores[az_name] = item['Score']
+                    except:
+                        scores[az_id] = item['Score']
+                elif not single_az and 'Region' in item:
+                    scores[item['Region']] = item['Score']
+
+            return scores
+
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            if error_code == 'UnsupportedOperation':
+                # API not available in this region or for this account
+                return {}
+            # Don't print error for capacity scores - it's supplementary info
+            return {}
+        except Exception:
+            return {}
+
+    def get_spot_prices_for_profile(self, profile_name: str) -> List[Dict]:
+        """Get current spot prices for instance type in a profile.
+
+        Args:
+            profile_name: Name of the profile
+
+        Returns:
+            List of spot price entries
+        """
+        profile = self.load_profile(profile_name)
+        if not profile:
+            return []
+
+        instance_type = profile.get('instance_type')
+        if not instance_type:
+            print(f"Profile {profile_name} does not specify an instance type")
+            return []
+
+        return self.get_spot_prices([instance_type])
+
     def _get_user_data_script(self, profile: Dict) -> Optional[str]:
         """Get user data script from profile.
         
@@ -395,9 +521,12 @@ class AWSInstanceManager:
             print(f"Error getting latest AMI for {os_type}: {e}")
             raise
     
-    def _get_default_vpc_subnet(self) -> Optional[str]:
+    def _get_default_vpc_subnet(self, availability_zone: str = None) -> Optional[str]:
         """Get the default VPC's subnet.
-        
+
+        Args:
+            availability_zone: If specified, return a subnet in this AZ
+
         Returns:
             Subnet ID of the default VPC or None if not found
         """
@@ -406,23 +535,25 @@ class AWSInstanceManager:
             vpcs = self.ec2_client.describe_vpcs(
                 Filters=[{'Name': 'is-default', 'Values': ['true']}]
             )
-            
+
             if not vpcs['Vpcs']:
                 return None
-            
+
             default_vpc_id = vpcs['Vpcs'][0]['VpcId']
-            
+
             # Get subnets in default VPC
-            subnets = self.ec2_client.describe_subnets(
-                Filters=[{'Name': 'vpc-id', 'Values': [default_vpc_id]}]
-            )
-            
+            filters = [{'Name': 'vpc-id', 'Values': [default_vpc_id]}]
+            if availability_zone:
+                filters.append({'Name': 'availability-zone', 'Values': [availability_zone]})
+
+            subnets = self.ec2_client.describe_subnets(Filters=filters)
+
             if not subnets['Subnets']:
                 return None
-            
+
             # Return the first available subnet
             return subnets['Subnets'][0]['SubnetId']
-            
+
         except ClientError:
             return None
     
@@ -608,27 +739,27 @@ class AWSInstanceManager:
             print(f"Error getting instance details for SSH config: {e}")
             return False
     
-    def _resolve_instance_identifier(self, identifier: str) -> Optional[str]:
+    def _resolve_instance_identifier(self, identifier: str, include_terminated: bool = False) -> Optional[str]:
         """Resolve instance identifier to instance ID.
-        
+
         Args:
             identifier: Instance name or ID
-            
+            include_terminated: If True, also search terminated instances
+
         Returns:
             Instance ID or None if not found
         """
         # If it looks like an instance ID, return as-is
         if identifier.startswith('i-') and len(identifier) >= 10:
             return identifier
-        
+
         # Otherwise, search by name tag
         try:
-            response = self.ec2_client.describe_instances(
-                Filters=[
-                    {'Name': 'tag:Name', 'Values': [identifier]},
-                    {'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopping', 'stopped']}
-                ]
-            )
+            filters = [{'Name': 'tag:Name', 'Values': [identifier]}]
+            if not include_terminated:
+                filters.append({'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopping', 'stopped']})
+
+            response = self.ec2_client.describe_instances(Filters=filters)
             
             instances = []
             for reservation in response['Reservations']:
@@ -652,17 +783,19 @@ class AWSInstanceManager:
             return None
     
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
-    def create_instance(self, profile_name: str, instance_name: str, app_class: str = None, 
-                       spot_price: float = None, dry_run: bool = False) -> Optional[str]:
+    def create_instance(self, profile_name: str, instance_name: str, app_class: str = None,
+                       spot_price: float = None, dry_run: bool = False,
+                       availability_zone: str = None) -> Optional[str]:
         """Create a new EC2 instance based on a profile.
-        
+
         Args:
             profile_name: Name of the profile to use
             instance_name: Name for the instance
             app_class: Application class tag
             spot_price: Maximum spot price (overrides profile)
             dry_run: If True, validate parameters without creating instance
-            
+            availability_zone: Specific AZ to launch in (e.g., us-east-1a)
+
         Returns:
             Instance ID if successful, None otherwise
         """
@@ -696,19 +829,24 @@ class AWSInstanceManager:
             
             # Get default subnet if not specified
             if not subnet_id:
-                subnet_id = self._get_default_vpc_subnet()
+                subnet_id = self._get_default_vpc_subnet(availability_zone)
                 if not subnet_id:
-                    print("Error: No subnet specified and no default VPC found.")
+                    if availability_zone:
+                        print(f"Error: No subnet found in availability zone {availability_zone}.")
+                    else:
+                        print("Error: No subnet specified and no default VPC found.")
                     return None
             
             # Use regions config for key name if available
             if not key_name and self.regions_config:
                 regions = self.regions_config.get('regions', {})
                 region_config = regions.get(self.region, {})
-                key_name = region_config.get('default_key_name')
-            
+                key_name = region_config.get('key_name') or region_config.get('default_key')
+
             if not key_name:
-                print("Warning: No SSH key specified. You may not be able to connect to the instance.")
+                print(f"Error: No SSH key configured for region {self.region}.")
+                print("Please configure a key_name in the profile or in ~/.spotman/regions.yaml")
+                return None
             
             # Prepare block device mappings
             block_device_mappings = [
@@ -786,6 +924,8 @@ class AWSInstanceManager:
                 run_params['SubnetId'] = subnet_id
             if encoded_user_data:
                 run_params['UserData'] = encoded_user_data
+            if availability_zone:
+                run_params['Placement'] = {'AvailabilityZone': availability_zone}
             
             # Handle spot instances
             if spot_instance:
@@ -812,6 +952,8 @@ class AWSInstanceManager:
             print(f"  Profile: {profile_name}")
             print(f"  Instance Type: {instance_type}")
             print(f"  AMI: {ami_id}")
+            if availability_zone:
+                print(f"  Availability Zone: {availability_zone}")
             print(f"  Spot Instance: {spot_instance}")
             if spot_instance:
                 print(f"  Max Spot Price: ${profile.get('spot_price', '0.05')}/hour")
@@ -1351,7 +1493,107 @@ class AWSInstanceManager:
             
         except ClientError as e:
             print(f"Error checking hibernation status: {e}")
-    
+
+    def get_spot_instance_status(self, instance_identifier: str) -> None:
+        """Get spot instance status and interruption information.
+
+        Args:
+            instance_identifier: Instance name or ID
+        """
+        instance_id = self._resolve_instance_identifier(instance_identifier, include_terminated=True)
+        if not instance_id:
+            return
+
+        try:
+            # Get instance details
+            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
+            instance = response['Reservations'][0]['Instances'][0]
+
+            instance_type = instance.get('InstanceType', 'N/A')
+            current_state = instance['State']['Name']
+            lifecycle = instance.get('InstanceLifecycle', 'on-demand')
+            spot_instance_request_id = instance.get('SpotInstanceRequestId')
+
+            print(f"\nSpot Instance Status for {instance_identifier}:")
+            print(f"  Instance ID: {instance_id}")
+            print(f"  Instance Type: {instance_type}")
+            print(f"  Current State: {current_state}")
+            print(f"  Lifecycle: {lifecycle}")
+
+            # Get state reason if available
+            state_reason = instance.get('StateReason', {})
+            if state_reason:
+                print(f"  State Reason: {state_reason.get('Code', 'N/A')} - {state_reason.get('Message', 'N/A')}")
+
+            if lifecycle != 'spot':
+                print("\n  ℹ️  This is not a spot instance.")
+                return
+
+            if not spot_instance_request_id:
+                print("\n  ⚠️  No spot instance request ID found.")
+                return
+
+            print(f"  Spot Request ID: {spot_instance_request_id}")
+
+            # Get spot instance request details
+            spot_response = self.ec2_client.describe_spot_instance_requests(
+                SpotInstanceRequestIds=[spot_instance_request_id]
+            )
+
+            if spot_response['SpotInstanceRequests']:
+                spot_request = spot_response['SpotInstanceRequests'][0]
+                spot_state = spot_request.get('State', 'N/A')
+                spot_status = spot_request.get('Status', {})
+                spot_price = spot_request.get('SpotPrice', 'N/A')
+                spot_type = spot_request.get('Type', 'N/A')
+
+                print(f"\nSpot Request Details:")
+                print(f"  Request State: {spot_state}")
+                print(f"  Status Code: {spot_status.get('Code', 'N/A')}")
+                print(f"  Status Message: {spot_status.get('Message', 'N/A')}")
+                print(f"  Max Price: ${spot_price}/hr")
+                print(f"  Request Type: {spot_type}")
+
+                # Check for interruption behavior
+                launch_spec = spot_request.get('LaunchSpecification', {})
+                instance_interruption = spot_request.get('InstanceInterruptionBehavior', 'terminate')
+                print(f"  Interruption Behavior: {instance_interruption}")
+
+                # Interpret status
+                status_code = spot_status.get('Code', '')
+                print(f"\nInterpretation:")
+                if status_code == 'fulfilled':
+                    print("  ✅ Spot request fulfilled - instance is running normally")
+                elif status_code == 'instance-terminated-by-price':
+                    print("  💰 Instance terminated because spot price exceeded your max bid")
+                elif status_code == 'instance-terminated-by-user':
+                    print("  👤 Instance was terminated by user")
+                elif status_code == 'instance-terminated-no-capacity':
+                    print("  📉 Instance terminated due to lack of spot capacity")
+                elif status_code == 'instance-terminated-capacity-oversubscribed':
+                    print("  📉 Instance terminated - capacity was oversubscribed")
+                elif status_code == 'instance-stopped-by-price':
+                    print("  💰 Instance stopped because spot price exceeded your max bid")
+                elif status_code == 'instance-stopped-by-user':
+                    print("  👤 Instance was stopped by user")
+                elif status_code == 'instance-stopped-no-capacity':
+                    print("  📉 Instance stopped due to lack of spot capacity")
+                elif status_code == 'marked-for-termination':
+                    print("  ⚠️  Instance is marked for termination (2-minute warning)")
+                elif status_code == 'marked-for-stop':
+                    print("  ⚠️  Instance is marked for stop (2-minute warning)")
+                elif status_code == 'pending-evaluation':
+                    print("  ⏳ Spot request is being evaluated")
+                elif status_code == 'pending-fulfillment':
+                    print("  ⏳ Waiting for spot capacity")
+                elif 'bad-parameters' in status_code:
+                    print(f"  ❌ Bad parameters in spot request")
+                else:
+                    print(f"  ℹ️  Status: {status_code}")
+
+        except ClientError as e:
+            print(f"Error getting spot instance status: {e}")
+
     def update_ssh_config(self, instance_id: str = None, profile_name: str = None, app_class: str = None):
         """Update SSH configuration for instances.
         

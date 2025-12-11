@@ -15,7 +15,7 @@ os_type: "ubuntu"
 update_os: true
 
 # Modular user data using external script
-user_data: !include scripts/modular-web-setup.sh
+user_data: !include ../scripts/modular-web-setup.sh
 
 # Tags
 tags:

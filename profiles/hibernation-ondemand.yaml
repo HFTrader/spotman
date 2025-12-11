@@ -15,7 +15,7 @@ os_type: "ubuntu"
 update_os: true  # Keep system current
 
 # Enhanced user data script for hibernation setup
-user_data: !include scripts/hibernation-setup.sh
+user_data: !include ../scripts/hibernation-setup.sh
 
 # Tags for on-demand hibernation instances
 tags:

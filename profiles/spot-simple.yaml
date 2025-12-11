@@ -16,7 +16,7 @@ os_type: "ubuntu"
 update_os: true  # Keep security patches current
 
 # Basic user data for essential setup
-user_data: !include scripts/spot-simple-setup.sh
+user_data: !include ../scripts/spot-simple-setup.sh
 
 # Tags for basic spot instances
 tags:

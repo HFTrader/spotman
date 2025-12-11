@@ -19,38 +19,59 @@ def format_instances_table(instances: List[Dict]) -> None:
     if not instances:
         print("No instances found.")
         return
-    
-    headers = ['Name', 'Instance ID', 'Type', 'State', 'Public IP', 'App Class', 'Profile']
-    
+
+    # Check if Region column is present
+    has_region = any('Region' in inst for inst in instances)
+
+    if has_region:
+        headers = ['Name', 'Instance ID', 'Type', 'State', 'Region', 'Public IP', 'App Class', 'Profile']
+    else:
+        headers = ['Name', 'Instance ID', 'Type', 'State', 'Public IP', 'App Class', 'Profile']
+
     # Calculate column widths
     widths = [len(h) for h in headers]
     for instance in instances:
-        widths[0] = max(widths[0], len(instance['Name']))
-        widths[1] = max(widths[1], len(instance['InstanceId']))
-        widths[2] = max(widths[2], len(instance['InstanceType']))
-        widths[3] = max(widths[3], len(instance['State']))
-        widths[4] = max(widths[4], len(instance['PublicIpAddress']))
-        widths[5] = max(widths[5], len(instance['ApplicationClass']))
-        widths[6] = max(widths[6], len(instance['Profile']))
-    
+        idx = 0
+        widths[idx] = max(widths[idx], len(instance['Name'])); idx += 1
+        widths[idx] = max(widths[idx], len(instance['InstanceId'])); idx += 1
+        widths[idx] = max(widths[idx], len(instance['InstanceType'])); idx += 1
+        widths[idx] = max(widths[idx], len(instance['State'])); idx += 1
+        if has_region:
+            widths[idx] = max(widths[idx], len(instance.get('Region', ''))); idx += 1
+        widths[idx] = max(widths[idx], len(instance['PublicIpAddress'])); idx += 1
+        widths[idx] = max(widths[idx], len(instance['ApplicationClass'])); idx += 1
+        widths[idx] = max(widths[idx], len(instance['Profile']))
+
     # Print header
     header_line = ' | '.join(h.ljust(w) for h, w in zip(headers, widths))
     print(header_line)
     print('-' * len(header_line))
-    
+
     # Print instances
     for instance in instances:
-        row = [
-            instance['Name'].ljust(widths[0]),
-            instance['InstanceId'].ljust(widths[1]),
-            instance['InstanceType'].ljust(widths[2]),
-            instance['State'].ljust(widths[3]),
-            instance['PublicIpAddress'].ljust(widths[4]),
-            instance['ApplicationClass'].ljust(widths[5]),
-            instance['Profile'].ljust(widths[6])
-        ]
+        if has_region:
+            row = [
+                instance['Name'].ljust(widths[0]),
+                instance['InstanceId'].ljust(widths[1]),
+                instance['InstanceType'].ljust(widths[2]),
+                instance['State'].ljust(widths[3]),
+                instance.get('Region', '').ljust(widths[4]),
+                instance['PublicIpAddress'].ljust(widths[5]),
+                instance['ApplicationClass'].ljust(widths[6]),
+                instance['Profile'].ljust(widths[7])
+            ]
+        else:
+            row = [
+                instance['Name'].ljust(widths[0]),
+                instance['InstanceId'].ljust(widths[1]),
+                instance['InstanceType'].ljust(widths[2]),
+                instance['State'].ljust(widths[3]),
+                instance['PublicIpAddress'].ljust(widths[4]),
+                instance['ApplicationClass'].ljust(widths[5]),
+                instance['Profile'].ljust(widths[6])
+            ]
         print(' | '.join(row))
-    
+
     print(f"\nTotal: {len(instances)} instance(s)")
 
 
@@ -130,6 +151,7 @@ Examples:
     create_parser.add_argument('--profile', required=True, help='Profile to use')
     create_parser.add_argument('--name', required=True, help='Instance name')
     create_parser.add_argument('--class', help='Application class tag')
+    create_parser.add_argument('--az', help='Availability zone (e.g., us-east-1a)')
     create_parser.add_argument('--spot-price', type=float, help='Maximum spot price')
     create_parser.add_argument('--dry-run', action='store_true', help='Validate without creating')
     
@@ -172,7 +194,18 @@ Examples:
     
     # List profiles command
     profiles_parser = subparsers.add_parser('list-profiles', help='List available profiles')
-    
+
+    # Spot status command
+    spot_status_parser = subparsers.add_parser('spot-status', help='Show spot instance status and interruption info')
+    spot_status_parser.add_argument('instance', help='Instance name or ID')
+
+    # Spot price command
+    spot_price_parser = subparsers.add_parser('spot-price', help='Show current spot prices')
+    spot_price_parser.add_argument('--profile', help='Get price for instance type in profile')
+    spot_price_parser.add_argument('--instance-type', action='append', dest='instance_types',
+                                   help='Instance type(s) to query (can be repeated)')
+    spot_price_parser.add_argument('--az', help='Specific availability zone')
+
     args = parser.parse_args()
     
     if not args.command:
@@ -188,30 +221,58 @@ Examples:
     
     # Execute commands
     if args.command == 'create':
+        # Infer region from AZ if provided and no region specified
+        if args.az and not args.region:
+            inferred_region = args.az[:-1]
+            manager = AWSInstanceManager(region=inferred_region, profile=args.aws_profile)
+
         app_class = getattr(args, 'class', None)
         if not app_class:
             print("Warning: No application class specified. Use --class or add it to the profile.")
-        
+
         instance_id = manager.create_instance(
-            args.profile, 
-            args.name, 
-            app_class, 
-            args.spot_price, 
-            args.dry_run
+            args.profile,
+            args.name,
+            app_class,
+            args.spot_price,
+            args.dry_run,
+            args.az
         )
-        
+
         if instance_id and not args.dry_run:
             print(f"Instance created: {instance_id}")
     
     elif args.command == 'list':
         app_class = getattr(args, 'class', None)
-        instances = manager.list_instances(
-            app_class=app_class,
-            state=args.state,
-            profile_name=args.profile,
-            all_instances=args.all
-        )
-        format_instances_table(instances)
+        all_instances = []
+
+        # Determine regions to query
+        if args.region:
+            regions_to_query = [args.region]
+        else:
+            regions_to_query = list(manager.regions_config.get('regions', {}).keys())
+            if not regions_to_query:
+                regions_to_query = [manager.region]
+
+        # Query each region
+        for region in regions_to_query:
+            if region == manager.region:
+                region_manager = manager
+            else:
+                region_manager = AWSInstanceManager(region=region, profile=args.aws_profile, quiet=True)
+
+            instances = region_manager.list_instances(
+                app_class=app_class,
+                state=args.state,
+                profile_name=args.profile,
+                all_instances=args.all
+            )
+            # Add region info to each instance
+            for inst in instances:
+                inst['Region'] = region
+            all_instances.extend(instances)
+
+        format_instances_table(all_instances)
     
     elif args.command == 'start':
         manager.start_instance(args.instance)
@@ -242,6 +303,109 @@ Examples:
     elif args.command == 'list-profiles':
         profiles = manager.list_profiles()
         format_profiles_table(profiles, manager)
+
+    elif args.command == 'spot-status':
+        manager.get_spot_instance_status(args.instance)
+
+    elif args.command == 'spot-price':
+        instance_types_queried = []
+
+        # Determine instance types to query
+        if args.profile:
+            profile = manager.get_profile(args.profile)
+            if profile:
+                instance_type = profile.get('instance_type')
+                if instance_type:
+                    instance_types_queried.append(instance_type)
+                else:
+                    print(f"Profile {args.profile} does not specify an instance type")
+                    sys.exit(1)
+            else:
+                print(f"Profile {args.profile} not found")
+                sys.exit(1)
+        elif args.instance_types:
+            instance_types_queried = args.instance_types
+        else:
+            # No profile or instance type specified - use all profiles
+            all_profiles = manager.list_profiles()
+            for profile_name in all_profiles:
+                profile = manager.get_profile(profile_name)
+                if profile:
+                    instance_type = profile.get('instance_type')
+                    if instance_type and instance_type not in instance_types_queried:
+                        instance_types_queried.append(instance_type)
+            if not instance_types_queried:
+                print("No profiles with instance types found")
+                sys.exit(1)
+
+        # Determine regions to query
+        if args.az:
+            # Infer region from AZ (e.g., us-east-1a -> us-east-1)
+            regions_to_query = [args.az[:-1]]
+        elif args.region:
+            regions_to_query = [args.region]
+        else:
+            # Query all configured regions
+            regions_to_query = list(manager.regions_config.get('regions', {}).keys())
+            if not regions_to_query:
+                regions_to_query = [manager.region]
+
+        # Query prices and capacity scores for each region
+        all_prices = []
+        all_capacity_scores = {}  # {region: {az: score}}
+        multi_region = len(regions_to_query) > 1
+        for region in regions_to_query:
+            if region == manager.region:
+                region_manager = manager
+            else:
+                region_manager = AWSInstanceManager(region=region, profile=args.aws_profile, quiet=True)
+            prices = region_manager.get_spot_prices(instance_types_queried, args.az if args.az else None)
+            all_prices.extend(prices)
+
+            # Get capacity scores for this region
+            capacity_scores = region_manager.get_spot_capacity_scores(instance_types_queried)
+            if capacity_scores:
+                all_capacity_scores[region] = capacity_scores
+
+        if all_prices:
+            # Sort by instance type, then by price
+            all_prices.sort(key=lambda x: (x['instance_type'], x['spot_price']))
+
+            print("\nCurrent Spot Prices:")
+            print("=" * 70)
+
+            # Helper to format capacity score
+            def format_capacity(az: str) -> str:
+                # Find the region for this AZ
+                region = az[:-1]  # e.g., us-east-1a -> us-east-1
+                if region in all_capacity_scores and az in all_capacity_scores[region]:
+                    score = all_capacity_scores[region][az]
+                    if score >= 8:
+                        indicator = "+++"  # High capacity
+                    elif score >= 5:
+                        indicator = "++"   # Medium capacity
+                    elif score >= 3:
+                        indicator = "+"    # Low capacity
+                    else:
+                        indicator = "-"    # Very low capacity
+                    return f" [capacity: {score}/10 {indicator}]"
+                return ""
+
+            # Group by instance type
+            current_type = None
+            for p in all_prices:
+                if p['instance_type'] != current_type:
+                    current_type = p['instance_type']
+                    print(f"\n📦 {current_type}")
+                capacity_info = format_capacity(p['availability_zone'])
+                print(f"   {p['availability_zone']}: ${p['spot_price']:.4f}/hr{capacity_info}")
+
+            # Print capacity legend if we have scores
+            if all_capacity_scores:
+                print("\n📊 Capacity Score Legend: 10=high likelihood, 1=low likelihood")
+                print("   +++ (8-10): Excellent | ++ (5-7): Good | + (3-4): Fair | - (1-2): Poor")
+        else:
+            print(f"No spot prices found for: {', '.join(instance_types_queried)}")
 
 
 if __name__ == '__main__':

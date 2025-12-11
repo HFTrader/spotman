@@ -33,7 +33,7 @@ ssh_port_forwards:
     remote_host: localhost
 
 # Development environment setup script
-user_data: !include scripts/dev-setup.sh
+user_data: !include ../scripts/dev-setup.sh
 
 # Tags for development instance
 tags:
