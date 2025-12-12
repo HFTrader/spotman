@@ -186,3 +186,5 @@ Desktop.ini
 # Application specific
 .spotman/
 backups/
+regions.yaml
+config.yaml

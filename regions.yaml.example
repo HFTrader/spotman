@@ -1,0 +1,29 @@
+# AWS regions configuration for SpotMan
+# Copy this file to regions.yaml and customize with your settings
+#
+# SSH key mappings for different regions
+
+ssh_keys:
+  my-key-virginia: ~/.ssh/my-key-virginia.pem
+  my-key-ohio: ~/.ssh/my-key-ohio.pem
+  my-key-oregon: ~/.ssh/my-key-oregon.pem
+
+regions:
+  us-east-1:
+    name: "US East (N. Virginia)"
+    ssh_user: ubuntu
+    default_key: my-key-virginia
+
+  us-east-2:
+    name: "US East (Ohio)"
+    ssh_user: ubuntu
+    default_key: my-key-ohio
+
+  us-west-2:
+    name: "US West (Oregon)"
+    ssh_user: ubuntu
+    default_key: my-key-oregon
+
+# Default settings
+default_region: us-east-2
+default_ssh_user: ubuntu
