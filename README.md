@@ -6,7 +6,7 @@
 
 Create an instance from a YAML profile:
 ```bash
-./spotman create --profile web-server --name web01 --class web
+./spotman create --profile web-server --alias web01 --class web
 ```
 
 Create an instance with auto-generated name:
@@ -60,7 +60,7 @@ Configure AWS credentials using one of:
 
 ```bash
 # With explicit name
-./spotman create --profile web-server --name web01 --class web
+./spotman create --profile web-server --alias web01 --class web
 
 # With auto-generated name
 ./spotman create --profile web-server --class web

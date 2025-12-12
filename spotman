@@ -128,8 +128,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s create --profile web-server --name web01 --class web
-  %(prog)s create --profile spot-hibernation --name spot01 --class spot
+  %(prog)s create --profile web-server --alias web01 --class web
+  %(prog)s create --profile spot-hibernation --alias spot01 --class spot
   %(prog)s list --class web --state running
   %(prog)s start web01
   %(prog)s stop web01
@@ -149,10 +149,12 @@ Examples:
     # Create command
     create_parser = subparsers.add_parser('create', help='Create a new instance')
     create_parser.add_argument('--profile', required=True, help='Profile to use')
-    create_parser.add_argument('--name', help='Instance name (default: profile-YYYYMMDD-HHMMSS)')
+    create_parser.add_argument('--alias', help='Instance alias (default: profile-YYYYMMDD-HHMMSS)')
     create_parser.add_argument('--class', help='Application class tag')
     create_parser.add_argument('--az', help='Availability zone (e.g., us-east-1a)')
     create_parser.add_argument('--spot-price', type=float, help='Maximum spot price')
+    create_parser.add_argument('--spot', action='store_true', help='Force spot instance (override profile)')
+    create_parser.add_argument('--on-demand', action='store_true', help='Force on-demand instance (override profile)')
     create_parser.add_argument('--dry-run', action='store_true', help='Validate without creating')
     
     # List command
@@ -227,7 +229,7 @@ Examples:
             manager = AWSInstanceManager(region=inferred_region, profile=args.aws_profile)
 
         # Generate instance name if not provided
-        instance_name = args.name
+        instance_name = args.alias
         if not instance_name:
             timestamp = time.strftime('%Y%m%d-%H%M%S')
             instance_name = f"{args.profile}-{timestamp}"
@@ -237,13 +239,24 @@ Examples:
         if not app_class:
             print("Warning: No application class specified. Use --class or add it to the profile.")
 
+        # Determine spot override
+        spot_override = None
+        if args.spot and args.on_demand:
+            print("Error: Cannot specify both --spot and --on-demand")
+            sys.exit(1)
+        elif args.spot:
+            spot_override = True
+        elif args.on_demand:
+            spot_override = False
+
         instance_id = manager.create_instance(
             args.profile,
             instance_name,
             app_class,
             args.spot_price,
             args.dry_run,
-            args.az
+            args.az,
+            spot_override=spot_override
         )
 
         if instance_id and not args.dry_run:

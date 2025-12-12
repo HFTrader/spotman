@@ -847,7 +847,7 @@ class AWSInstanceManager:
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
     def create_instance(self, profile_name: str, instance_name: str, app_class: str = None,
                        spot_price: float = None, dry_run: bool = False,
-                       availability_zone: str = None) -> Optional[str]:
+                       availability_zone: str = None, spot_override: bool = None) -> Optional[str]:
         """Create a new EC2 instance based on a profile.
 
         Args:
@@ -857,6 +857,7 @@ class AWSInstanceManager:
             spot_price: Maximum spot price (overrides profile)
             dry_run: If True, validate parameters without creating instance
             availability_zone: Specific AZ to launch in (e.g., us-east-1a)
+            spot_override: If True, force spot; if False, force on-demand; if None, use profile
 
         Returns:
             Instance ID if successful, None otherwise
@@ -884,7 +885,12 @@ class AWSInstanceManager:
             root_volume_size = profile.get('root_volume_size', 8)
             root_volume_type = profile.get('root_volume_type', 'gp3')
             root_volume_encrypted = profile.get('root_volume_encrypted', False)
+
             update_os = profile.get('update_os', False)
+
+            # Apply spot override if specified
+            if spot_override is not None:
+                spot_instance = spot_override
             
             # Override spot price if provided
             if spot_price is not None:
