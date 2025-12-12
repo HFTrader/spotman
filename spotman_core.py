@@ -762,8 +762,33 @@ class AWSInstanceManager:
         except ClientError:
             return False
 
+    def _resolve_instance_in_region(self, identifier: str, include_terminated: bool = False) -> list:
+        """Resolve instance identifier to instances in current region only.
+
+        Args:
+            identifier: Instance name or ID
+            include_terminated: If True, also search terminated instances
+
+        Returns:
+            List of instance dicts found in this region
+        """
+        try:
+            filters = [{'Name': 'tag:Name', 'Values': [identifier]}]
+            if not include_terminated:
+                filters.append({'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopping', 'stopped']})
+
+            response = self.ec2_client.describe_instances(Filters=filters)
+
+            instances = []
+            for reservation in response['Reservations']:
+                instances.extend(reservation['Instances'])
+            return instances
+
+        except ClientError:
+            return []
+
     def _resolve_instance_identifier(self, identifier: str, include_terminated: bool = False) -> Optional[str]:
-        """Resolve instance identifier to instance ID.
+        """Resolve instance identifier to instance ID, searching across all configured regions.
 
         Args:
             identifier: Instance name or ID
@@ -776,34 +801,48 @@ class AWSInstanceManager:
         if identifier.startswith('i-') and len(identifier) >= 10:
             return identifier
 
-        # Otherwise, search by name tag
-        try:
-            filters = [{'Name': 'tag:Name', 'Values': [identifier]}]
-            if not include_terminated:
-                filters.append({'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopping', 'stopped']})
+        # First, search in the current region
+        instances = self._resolve_instance_in_region(identifier, include_terminated)
 
-            response = self.ec2_client.describe_instances(Filters=filters)
-
-            instances = []
-            for reservation in response['Reservations']:
-                instances.extend(reservation['Instances'])
-
-            if len(instances) == 0:
-                print(f"No instance found with name: {identifier}")
-                return None
-            elif len(instances) > 1:
+        if instances:
+            if len(instances) == 1:
+                return instances[0]['InstanceId']
+            else:
                 print(f"Multiple instances found with name: {identifier}")
                 for inst in instances:
                     state = inst['State']['Name']
-                    print(f"  {inst['InstanceId']} ({state})")
+                    print(f"  {inst['InstanceId']} ({state}) in {self.region}")
                 print("Please use the instance ID instead.")
                 return None
-            else:
-                return instances[0]['InstanceId']
 
-        except ClientError as e:
-            print(f"Error resolving instance identifier: {e}")
-            return None
+        # Not found in current region, search other configured regions
+        other_regions = [r for r in self.regions_config.get('regions', {}).keys() if r != self.region]
+
+        for region in other_regions:
+            try:
+                other_manager = AWSInstanceManager(region=region, profile=self.session.profile_name, quiet=True)
+                instances = other_manager._resolve_instance_in_region(identifier, include_terminated)
+
+                if instances:
+                    if len(instances) == 1:
+                        # Found in another region - switch this manager to that region
+                        print(f"Found instance '{identifier}' in region {region}")
+                        self.region = region
+                        self.ec2_client = self.session.client('ec2', region_name=region)
+                        self.ec2 = self.session.resource('ec2', region_name=region)
+                        return instances[0]['InstanceId']
+                    else:
+                        print(f"Multiple instances found with name: {identifier}")
+                        for inst in instances:
+                            state = inst['State']['Name']
+                            print(f"  {inst['InstanceId']} ({state}) in {region}")
+                        print("Please use the instance ID instead.")
+                        return None
+            except Exception:
+                continue
+
+        print(f"No instance found with name: {identifier}")
+        return None
     
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
     def create_instance(self, profile_name: str, instance_name: str, app_class: str = None,
