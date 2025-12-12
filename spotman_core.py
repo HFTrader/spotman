@@ -1190,32 +1190,44 @@ class AWSInstanceManager:
     
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
     def terminate_instance(self, instance_identifier: str) -> bool:
-        """Terminate an EC2 instance.
-        
+        """Terminate an EC2 instance and cancel any associated spot request.
+
         Args:
             instance_identifier: Instance name or ID
-            
+
         Returns:
             True if successful, False otherwise
         """
         instance_id = self._resolve_instance_identifier(instance_identifier)
         if not instance_id:
             return False
-        
+
         try:
             # Get instance details for confirmation
             response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
             instance = response['Reservations'][0]['Instances'][0]
             instance_name = instance_identifier
-            
+
             for tag in instance.get('Tags', []):
                 if tag['Key'] == 'Name':
                     instance_name = tag['Value']
                     break
-            
+
+            # Check for spot instance request and cancel it first
+            spot_request_id = instance.get('SpotInstanceRequestId')
+            if spot_request_id:
+                print(f"Cancelling spot request: {spot_request_id}")
+                try:
+                    self.ec2_client.cancel_spot_instance_requests(
+                        SpotInstanceRequestIds=[spot_request_id]
+                    )
+                    print("✅ Spot request cancelled.")
+                except ClientError as e:
+                    print(f"Warning: Could not cancel spot request: {e}")
+
             print(f"Terminating instance: {instance_name} ({instance_id})")
             print("⚠️  This action cannot be undone!")
-            
+
             self.ec2_client.terminate_instances(InstanceIds=[instance_id])
             print("✅ Termination request sent successfully.")
             return True
