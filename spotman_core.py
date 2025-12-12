@@ -739,6 +739,29 @@ class AWSInstanceManager:
             print(f"Error getting instance details for SSH config: {e}")
             return False
     
+    def _instance_name_exists(self, name: str) -> bool:
+        """Check if an instance with the given name already exists.
+
+        Args:
+            name: Instance name to check
+
+        Returns:
+            True if an instance with this name exists (not terminated), False otherwise
+        """
+        try:
+            filters = [
+                {'Name': 'tag:Name', 'Values': [name]},
+                {'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopping', 'stopped']}
+            ]
+            response = self.ec2_client.describe_instances(Filters=filters)
+
+            for reservation in response['Reservations']:
+                if reservation['Instances']:
+                    return True
+            return False
+        except ClientError:
+            return False
+
     def _resolve_instance_identifier(self, identifier: str, include_terminated: bool = False) -> Optional[str]:
         """Resolve instance identifier to instance ID.
 
@@ -760,11 +783,11 @@ class AWSInstanceManager:
                 filters.append({'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopping', 'stopped']})
 
             response = self.ec2_client.describe_instances(Filters=filters)
-            
+
             instances = []
             for reservation in response['Reservations']:
                 instances.extend(reservation['Instances'])
-            
+
             if len(instances) == 0:
                 print(f"No instance found with name: {identifier}")
                 return None
@@ -777,7 +800,7 @@ class AWSInstanceManager:
                 return None
             else:
                 return instances[0]['InstanceId']
-                
+
         except ClientError as e:
             print(f"Error resolving instance identifier: {e}")
             return None
@@ -800,9 +823,15 @@ class AWSInstanceManager:
             Instance ID if successful, None otherwise
         """
         try:
+            # Check for duplicate instance name
+            if self._instance_name_exists(instance_name):
+                print(f"Error: An instance named '{instance_name}' already exists.")
+                print("Please choose a different name or terminate the existing instance first.")
+                return None
+
             # Load profile
             profile = self.load_profile(profile_name)
-            
+
             # Get configuration values with defaults
             instance_type = profile.get('instance_type', 't3.micro')
             ami_id = profile.get('ami_id')
@@ -828,13 +857,11 @@ class AWSInstanceManager:
                 ami_id = self._get_latest_ami(os_type, ami_name_pattern)
             
             # Get default subnet if not specified
-            if not subnet_id:
+            # Only look up subnet if AZ is specified - otherwise let AWS pick both
+            if not subnet_id and availability_zone:
                 subnet_id = self._get_default_vpc_subnet(availability_zone)
                 if not subnet_id:
-                    if availability_zone:
-                        print(f"Error: No subnet found in availability zone {availability_zone}.")
-                    else:
-                        print("Error: No subnet specified and no default VPC found.")
+                    print(f"Error: No subnet found in availability zone {availability_zone}.")
                     return None
             
             # Use regions config for key name if available
@@ -929,15 +956,20 @@ class AWSInstanceManager:
             
             # Handle spot instances
             if spot_instance:
-                spot_price = profile.get('spot_price', '0.05')  # Default max price
-                
+                spot_options = {
+                    'SpotInstanceType': 'persistent' if hibernation_enabled else 'one-time',
+                    'InstanceInterruptionBehavior': 'hibernate' if hibernation_enabled else 'terminate'
+                }
+
+                # Only set MaxPrice if explicitly specified in profile
+                # If not set, AWS uses on-demand price as max (better for availability)
+                spot_price = profile.get('spot_price')
+                if spot_price:
+                    spot_options['MaxPrice'] = str(spot_price)
+
                 run_params['InstanceMarketOptions'] = {
                     'MarketType': 'spot',
-                    'SpotOptions': {
-                        'MaxPrice': str(spot_price),
-                        'SpotInstanceType': 'persistent' if hibernation_enabled else 'one-time',
-                        'InstanceInterruptionBehavior': 'hibernate' if hibernation_enabled else 'terminate'
-                    }
+                    'SpotOptions': spot_options
                 }
             
             # Set HibernationOptions for hibernation (works for both spot and on-demand)
@@ -956,7 +988,11 @@ class AWSInstanceManager:
                 print(f"  Availability Zone: {availability_zone}")
             print(f"  Spot Instance: {spot_instance}")
             if spot_instance:
-                print(f"  Max Spot Price: ${profile.get('spot_price', '0.05')}/hour")
+                spot_price = profile.get('spot_price')
+                if spot_price:
+                    print(f"  Max Spot Price: ${spot_price}/hour")
+                else:
+                    print(f"  Max Spot Price: on-demand (no limit)")
             print(f"  Hibernation: {hibernation_enabled}")
             print(f"  Application Class: {app_class or 'None'}")
             

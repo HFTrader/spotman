@@ -5,11 +5,13 @@
 # Instance configuration
 instance_type: "c7a.4xlarge"
 spot_instance: true
-spot_price: "0.85"  # Slightly above on-demand ($0.77) for availability
+hibernation_enabled: true
 
 # Storage configuration
-root_volume_size: 30  # GB - space for experiments and results
+# 32 GB RAM requires ~40 GB disk for hibernation, plus space for OS/experiments
+root_volume_size: 80  # GB - 32 GB for RAM hibernate + space for experiments
 root_volume_type: "gp3"
+root_volume_encrypted: true  # Required for hibernation
 
 # Operating system configuration
 os_type: "ubuntu"

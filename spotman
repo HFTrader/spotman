@@ -149,7 +149,7 @@ Examples:
     # Create command
     create_parser = subparsers.add_parser('create', help='Create a new instance')
     create_parser.add_argument('--profile', required=True, help='Profile to use')
-    create_parser.add_argument('--name', required=True, help='Instance name')
+    create_parser.add_argument('--name', help='Instance name (default: profile-YYYYMMDD-HHMMSS)')
     create_parser.add_argument('--class', help='Application class tag')
     create_parser.add_argument('--az', help='Availability zone (e.g., us-east-1a)')
     create_parser.add_argument('--spot-price', type=float, help='Maximum spot price')
@@ -226,13 +226,20 @@ Examples:
             inferred_region = args.az[:-1]
             manager = AWSInstanceManager(region=inferred_region, profile=args.aws_profile)
 
+        # Generate instance name if not provided
+        instance_name = args.name
+        if not instance_name:
+            timestamp = time.strftime('%Y%m%d-%H%M%S')
+            instance_name = f"{args.profile}-{timestamp}"
+            print(f"Using generated name: {instance_name}")
+
         app_class = getattr(args, 'class', None)
         if not app_class:
             print("Warning: No application class specified. Use --class or add it to the profile.")
 
         instance_id = manager.create_instance(
             args.profile,
-            args.name,
+            instance_name,
             app_class,
             args.spot_price,
             args.dry_run,
