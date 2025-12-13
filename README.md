@@ -222,6 +222,37 @@ tags:
 user_data: !include scripts/setup.sh
 ```
 
+### AMI Configuration
+
+SpotMan can automatically find the latest AMI for supported operating systems, or you can specify an exact AMI.
+
+**Supported OS types:**
+
+| os_type | Description | Default AMI Pattern |
+|---------|-------------|---------------------|
+| `ubuntu` | Ubuntu 22.04 LTS (Jammy) | `ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*` |
+| `amazon-linux` | Amazon Linux 2 | `amzn2-ami-hvm-*-x86_64-gp2` |
+| `centos` | CentOS 7 | `CentOS Linux 7 x86_64 HVM EBS *` |
+
+**Auto-select latest AMI (recommended):**
+```yaml
+# Uses the latest Ubuntu 22.04 AMI
+os_type: "ubuntu"
+```
+
+**Custom AMI pattern:**
+```yaml
+# Use a different Ubuntu version
+os_type: "ubuntu"
+ami_name: "ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"
+```
+
+**Specific AMI ID:**
+```yaml
+# Use an exact AMI (skips auto-detection)
+ami_id: "ami-0123456789abcdef0"
+```
+
 ## Region Configuration
 
 Configure regions in `regions.yaml`:
