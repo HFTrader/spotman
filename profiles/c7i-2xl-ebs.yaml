@@ -1,0 +1,31 @@
+# c7i.2xlarge with hibernation and EBS volume attachment
+# 8 vCPUs, 16 GB RAM, Intel Sapphire Rapids
+# Must launch in us-east-2c where the EBS volumes reside
+
+instance_type: "c7i.2xlarge"
+spot_instance: false
+hibernation_enabled: true
+
+# Storage: 16 GB RAM requires ~20 GB for hibernation + OS space
+root_volume_size: 50
+root_volume_type: "gp3"
+root_volume_encrypted: true  # Required for hibernation
+
+os_type: "ubuntu"
+update_os: true
+
+# EBS volumes to attach after launch (in us-east-2c)
+# vol-025f90d741137ae38: 500 GB sc1
+# vol-0a82ba4fd16c906f7: 16 GB gp2
+attach_volumes:
+  - volume_id: "vol-025f90d741137ae38"
+    device: "/dev/sdf"
+    mount_point: "/mnt/data1"
+  - volume_id: "vol-0a82ba4fd16c906f7"
+    device: "/dev/sdg"
+    mount_point: "/mnt/data2"
+
+tags:
+  ApplicationClass: "compute"
+  Environment: "development"
+  ManagedBy: "spotman"

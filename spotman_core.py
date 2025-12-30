@@ -817,7 +817,95 @@ class AWSInstanceManager:
         except Exception as e:
             print(f"Warning: Error waiting for instance or updating SSH config: {e}")
             print(f"Instance {instance_id} was created but may still be starting up.")
-    
+
+    def _attach_volumes(self, instance_id: str, profile: Dict) -> None:
+        """Attach existing EBS volumes to an instance.
+
+        Args:
+            instance_id: EC2 instance ID
+            profile: Profile configuration containing attach_volumes list
+        """
+        attach_volumes = profile.get('attach_volumes', [])
+        if not attach_volumes:
+            return
+
+        print(f"Attaching {len(attach_volumes)} EBS volume(s)...")
+
+        for vol_config in attach_volumes:
+            volume_id = vol_config.get('volume_id')
+            device = vol_config.get('device')
+
+            if not volume_id or not device:
+                print(f"  Warning: Skipping volume config with missing volume_id or device")
+                continue
+
+            try:
+                self.ec2_client.attach_volume(
+                    VolumeId=volume_id,
+                    InstanceId=instance_id,
+                    Device=device
+                )
+                mount_point = vol_config.get('mount_point', '')
+                mount_info = f" (mount at {mount_point})" if mount_point else ""
+                print(f"  ✓ Attached {volume_id} as {device}{mount_info}")
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                error_msg = e.response['Error']['Message']
+                print(f"  ✗ Failed to attach {volume_id}: {error_code} - {error_msg}")
+            except Exception as e:
+                print(f"  ✗ Failed to attach {volume_id}: {e}")
+
+    def _verify_and_reattach_volumes(self, instance_id: str, profile: Dict) -> None:
+        """Verify attached volumes after hibernate resume and reattach if needed.
+
+        After hibernate resume, EBS volumes may show as 'attached' in AWS but not
+        appear as block devices in the OS. This method forces a detach/reattach
+        cycle to ensure volumes are properly visible.
+
+        Args:
+            instance_id: EC2 instance ID
+            profile: Profile configuration containing attach_volumes list
+        """
+        attach_volumes = profile.get('attach_volumes', [])
+        if not attach_volumes:
+            return
+
+        print("Refreshing attached volumes after hibernate resume...")
+
+        for vol_config in attach_volumes:
+            volume_id = vol_config.get('volume_id')
+            device = vol_config.get('device')
+
+            if not volume_id or not device:
+                continue
+
+            try:
+                # Check current volume state
+                vol_info = self.ec2_client.describe_volumes(VolumeIds=[volume_id])
+                vol_state = vol_info['Volumes'][0]['State']
+                attachments = vol_info['Volumes'][0].get('Attachments', [])
+
+                # If attached, detach first (hibernate resume leaves volumes in limbo)
+                if vol_state == 'in-use' and attachments:
+                    attached_instance = attachments[0].get('InstanceId')
+                    if attached_instance == instance_id:
+                        print(f"  Detaching {volume_id}...")
+                        self.ec2_client.detach_volume(VolumeId=volume_id)
+                        waiter = self.ec2_client.get_waiter('volume_available')
+                        waiter.wait(VolumeIds=[volume_id], WaiterConfig={'Delay': 3, 'MaxAttempts': 40})
+
+                # Now attach
+                self.ec2_client.attach_volume(
+                    VolumeId=volume_id,
+                    InstanceId=instance_id,
+                    Device=device
+                )
+                mount_point = vol_config.get('mount_point', '')
+                mount_info = f" (mount at {mount_point})" if mount_point else ""
+                print(f"  ✓ Attached {volume_id} as {device}{mount_info}")
+            except Exception as e:
+                print(f"  ✗ Failed to attach {volume_id}: {e}")
+
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
     def _get_latest_ami(self, os_type: str, ami_name_pattern: str = None) -> str:
         """Get the latest AMI ID for the specified OS type.
@@ -1100,6 +1188,10 @@ class AWSInstanceManager:
 
             # Wait and setup SSH
             self._wait_for_instance_and_setup_ssh(instance_id, instance_name)
+
+            # Attach any existing EBS volumes specified in profile
+            self._attach_volumes(instance_id, profile)
+
             return instance_id
 
         except ClientError as e:
@@ -1270,8 +1362,13 @@ class AWSInstanceManager:
             return False
 
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
-    def hibernate_instance(self, instance_identifier: str) -> bool:
-        """Hibernate an EC2 instance."""
+    def hibernate_instance(self, instance_identifier: str, wait: bool = True) -> bool:
+        """Hibernate an EC2 instance.
+
+        Args:
+            instance_identifier: Instance name or ID
+            wait: If True (default), wait for instance to be fully stopped
+        """
         instance_id = self._resolve_instance_identifier(instance_identifier)
         if not instance_id:
             return False
@@ -1280,7 +1377,7 @@ class AWSInstanceManager:
             response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
             instance = response['Reservations'][0]['Instances'][0]
 
-            if not instance.get('HibernateOptions', {}).get('Configured', False):
+            if not instance.get('HibernationOptions', {}).get('Configured', False):
                 print("Error: Hibernation is not enabled for this instance.")
                 return False
 
@@ -1290,8 +1387,21 @@ class AWSInstanceManager:
 
             print(f"Hibernating instance: {instance_identifier} ({instance_id})")
             self.ec2_client.stop_instances(InstanceIds=[instance_id], Hibernate=True)
-            print("✅ Hibernation request sent successfully.")
-            print("💡 Instance state and memory will be preserved.")
+
+            if wait:
+                print("Waiting for instance to hibernate...")
+                waiter = self.ec2_client.get_waiter('instance_stopped')
+                try:
+                    waiter.wait(InstanceIds=[instance_id], WaiterConfig={'Delay': 10, 'MaxAttempts': 60})
+                    print("✅ Instance hibernated successfully.")
+                    print("💡 Instance state and memory have been preserved.")
+                except Exception as e:
+                    print(f"Error: Hibernation may have failed: {e}")
+                    return False
+            else:
+                print("✅ Hibernation request sent.")
+                print("💡 Use --no-wait was specified; instance is still hibernating.")
+
             return True
         except ClientError as e:
             if e.response.get('Error', {}).get('Code') == 'UnsupportedOperation':
@@ -1301,15 +1411,21 @@ class AWSInstanceManager:
             return False
 
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
-    def resume_hibernated_instance(self, instance_identifier: str) -> bool:
-        """Resume a hibernated EC2 instance."""
+    def resume_hibernated_instance(self, instance_identifier: str, wait: bool = True) -> bool:
+        """Resume a hibernated EC2 instance.
+
+        Args:
+            instance_identifier: Instance name or ID
+            wait: If True (default), wait for instance to be fully running
+        """
         instance_id = self._resolve_instance_identifier(instance_identifier)
         if not instance_id:
             return False
 
         try:
             response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-            current_state = response['Reservations'][0]['Instances'][0]['State']['Name']
+            instance = response['Reservations'][0]['Instances'][0]
+            current_state = instance['State']['Name']
 
             if current_state == 'running':
                 print(f"Instance {instance_identifier} is already running.")
@@ -1318,10 +1434,47 @@ class AWSInstanceManager:
                 print(f"Error: Instance is not stopped (current state: {current_state}).")
                 return False
 
+            # Get profile name from tags for volume reattachment
+            profile_name = None
+            for tag in instance.get('Tags', []):
+                if tag['Key'] == 'Profile':
+                    profile_name = tag['Value']
+                    break
+
             print(f"Resuming instance: {instance_identifier} ({instance_id})")
             self.ec2_client.start_instances(InstanceIds=[instance_id])
-            print("✅ Resume request sent successfully.")
-            print("💡 Instance will restore from hibernated state.")
+
+            if wait:
+                print("Waiting for instance to be running...")
+                waiter = self.ec2_client.get_waiter('instance_running')
+                try:
+                    waiter.wait(InstanceIds=[instance_id], WaiterConfig={'Delay': 10, 'MaxAttempts': 60})
+                    print("✅ Instance resumed successfully.")
+                except Exception as e:
+                    print(f"Error: Resume may have failed: {e}")
+                    return False
+
+                # Update SSH config with new IP address
+                instance_name = instance_identifier
+                # If instance_identifier was an ID, get the name from tags
+                if instance_identifier.startswith('i-'):
+                    for tag in instance.get('Tags', []):
+                        if tag['Key'] == 'Name':
+                            instance_name = tag['Value']
+                            break
+                host_name = f"spotman-{instance_name}"
+                if self._add_ssh_config_entry(instance_id, host_name):
+                    print(f"SSH config updated. Connect with: ssh {host_name}")
+
+                # Verify and reattach volumes if profile has attach_volumes
+                if profile_name:
+                    profile = self.get_profile(profile_name)
+                    if profile and profile.get('attach_volumes'):
+                        self._verify_and_reattach_volumes(instance_id, profile)
+            else:
+                print("✅ Resume request sent.")
+                print("💡 --no-wait was specified; instance is still resuming.")
+
             return True
         except ClientError as e:
             print(f"Error resuming instance: {e}")

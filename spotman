@@ -175,10 +175,14 @@ Examples:
     # Hibernate command
     hibernate_parser = subparsers.add_parser('hibernate', help='Hibernate an instance')
     hibernate_parser.add_argument('instance', help='Instance name or ID')
-    
+    hibernate_parser.add_argument('--no-wait', action='store_true',
+                                  help='Return immediately without waiting for hibernation to complete')
+
     # Resume command
     resume_parser = subparsers.add_parser('resume', help='Resume a hibernated instance')
     resume_parser.add_argument('instance', help='Instance name or ID')
+    resume_parser.add_argument('--no-wait', action='store_true',
+                               help='Return immediately without waiting for instance to be running')
     
     # Terminate command
     terminate_parser = subparsers.add_parser('terminate', help='Terminate an instance')
@@ -301,10 +305,10 @@ Examples:
         manager.stop_instance(args.instance)
     
     elif args.command == 'hibernate':
-        manager.hibernate_instance(args.instance)
-    
+        manager.hibernate_instance(args.instance, wait=not args.no_wait)
+
     elif args.command == 'resume':
-        manager.resume_hibernated_instance(args.instance)
+        manager.resume_hibernated_instance(args.instance, wait=not args.no_wait)
     
     elif args.command == 'terminate':
         manager.terminate_instance(args.instance)
