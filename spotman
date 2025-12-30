@@ -197,7 +197,11 @@ Examples:
     ssh_parser.add_argument('--instance', help='Specific instance to update')
     ssh_parser.add_argument('--class', help='Update instances with this application class')
     ssh_parser.add_argument('--profile', help='Update instances with this profile')
-    
+
+    # Sync SSH command
+    sync_ssh_parser = subparsers.add_parser('sync-ssh',
+        help='Sync SSH config: remove stale entries, update running instances')
+
     # List profiles command
     profiles_parser = subparsers.add_parser('list-profiles', help='List available profiles')
 
@@ -323,7 +327,10 @@ Examples:
             profile_name=args.profile,
             app_class=app_class
         )
-    
+
+    elif args.command == 'sync-ssh':
+        manager.sync_ssh_config()
+
     elif args.command == 'list-profiles':
         profiles = manager.list_profiles()
         format_profiles_table(profiles, manager)

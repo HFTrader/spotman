@@ -538,6 +538,81 @@ class SSHConfigManager:
             print(f"Error updating SSH config: {e}")
             return False
 
+    def remove_entry(self, host_name: str) -> bool:
+        """Remove SSH config entry for a host.
+
+        Args:
+            host_name: SSH host alias to remove
+
+        Returns:
+            True if entry was removed, False if not found or error
+        """
+        if not os.path.exists(self.config_path):
+            return False
+
+        try:
+            with open(self.config_path, 'r') as f:
+                existing_config = f.read()
+
+            # Filter out the entry for this host
+            filtered_lines = []
+            skip_until_next_host = False
+
+            for line in existing_config.split('\n'):
+                if line.startswith('Host '):
+                    skip_until_next_host = (line == f"Host {host_name}")
+                    if not skip_until_next_host:
+                        filtered_lines.append(line)
+                elif line.startswith('# SpotMan managed entry for') and host_name in line:
+                    skip_until_next_host = True
+                elif not skip_until_next_host:
+                    filtered_lines.append(line)
+
+            updated_config = '\n'.join(filtered_lines)
+
+            with open(self.config_path, 'w') as f:
+                f.write(updated_config)
+
+            return True
+
+        except Exception as e:
+            print(f"Error removing SSH config entry: {e}")
+            return False
+
+    def get_all_entries(self) -> List[Dict]:
+        """Get all SSH config entries managed by SpotMan.
+
+        Returns:
+            List of dicts with host_name and instance_id
+        """
+        entries = []
+        if not os.path.exists(self.config_path):
+            return entries
+
+        try:
+            with open(self.config_path, 'r') as f:
+                content = f.read()
+
+            current_entry = {}
+            for line in content.split('\n'):
+                if line.startswith('# SpotMan managed entry for'):
+                    # Parse: # SpotMan managed entry for hostname (i-xxx)
+                    import re
+                    match = re.search(r'for (.+) \((i-[a-z0-9]+)\)', line)
+                    if match:
+                        current_entry = {
+                            'host_name': match.group(1),
+                            'instance_id': match.group(2)
+                        }
+                elif line.startswith('Host ') and current_entry:
+                    entries.append(current_entry)
+                    current_entry = {}
+
+            return entries
+
+        except Exception:
+            return []
+
 
 class AWSInstanceManager:
     """Manages AWS EC2 instances with application class tagging."""
@@ -1652,6 +1727,95 @@ class AWSInstanceManager:
                 
                 host_name = f"spotman-{instance_name}"
                 self._add_ssh_config_entry(instance_id, host_name)
-                
+
         except Exception as e:
             print(f"Error updating SSH config: {e}")
+
+    def sync_ssh_config(self) -> None:
+        """Sync SSH config with current instances across all regions.
+
+        This method:
+        - Removes SSH entries for terminated/non-existent instances
+        - Updates SSH entries for running instances with current IPs
+        """
+        print("Syncing SSH config with current instances...")
+
+        # Get all SSH config entries
+        ssh_entries = self.ssh_config.get_all_entries()
+        if not ssh_entries:
+            print("No SpotMan SSH entries found.")
+
+        # Get all running spotman instances across all regions
+        all_instances = {}  # instance_id -> instance_data
+        regions_to_check = list(self.regions_config.get('regions', {}).keys()) if self.regions_config else [self.region]
+
+        for region in regions_to_check:
+            try:
+                ec2 = self.session.client('ec2', region_name=region)
+                response = ec2.describe_instances(
+                    Filters=[
+                        {'Name': 'tag:CreatedBy', 'Values': ['spotman']},
+                        {'Name': 'instance-state-name', 'Values': ['running', 'stopped', 'stopping', 'pending']}
+                    ]
+                )
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance['_region'] = region
+                        all_instances[instance['InstanceId']] = instance
+            except Exception as e:
+                print(f"  Warning: Could not check region {region}: {e}")
+
+        # Track what we did
+        removed = []
+        updated = []
+
+        # Remove entries for instances that no longer exist
+        for entry in ssh_entries:
+            instance_id = entry['instance_id']
+            host_name = entry['host_name']
+
+            if instance_id not in all_instances:
+                # Instance no longer exists - remove SSH entry
+                if self.ssh_config.remove_entry(host_name):
+                    removed.append(host_name)
+
+        # Update entries for running instances
+        for instance_id, instance in all_instances.items():
+            if instance['State']['Name'] != 'running':
+                continue
+
+            public_ip = instance.get('PublicIpAddress')
+            if not public_ip:
+                continue
+
+            # Get instance name
+            instance_name = 'unknown'
+            for tag in instance.get('Tags', []):
+                if tag['Key'] == 'Name':
+                    instance_name = tag['Value']
+                    break
+
+            host_name = f"spotman-{instance_name}"
+
+            # Switch to the correct region for this instance
+            original_region = self.region
+            self.region = instance['_region']
+            self.ec2_client = self.session.client('ec2', region_name=self.region)
+
+            if self._add_ssh_config_entry(instance_id, host_name):
+                updated.append(host_name)
+
+            # Restore original region
+            self.region = original_region
+            self.ec2_client = self.session.client('ec2', region_name=self.region)
+
+        # Print summary
+        print(f"\nSSH config sync complete:")
+        print(f"  Removed: {len(removed)} stale entries")
+        if removed:
+            for h in removed:
+                print(f"    - {h}")
+        print(f"  Updated: {len(updated)} entries")
+        if updated:
+            for h in updated:
+                print(f"    + {h}")
