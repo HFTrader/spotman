@@ -3,7 +3,7 @@
 # Must launch in us-east-2c where the EBS volumes reside
 
 instance_type: "c7i.2xlarge"
-spot_instance: false
+spot_instance: true
 hibernation_enabled: true
 
 # Storage: 16 GB RAM requires ~20 GB for hibernation + OS space
@@ -15,8 +15,6 @@ os_type: "ubuntu"
 update_os: true
 
 # EBS volumes to attach after launch (in us-east-2c)
-# vol-025f90d741137ae38: 500 GB sc1
-# vol-0a82ba4fd16c906f7: 16 GB gp2
 attach_volumes:
   - volume_id: "vol-025f90d741137ae38"
     device: "/dev/sdf"

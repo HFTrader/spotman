@@ -893,6 +893,104 @@ class AWSInstanceManager:
             print(f"Warning: Error waiting for instance or updating SSH config: {e}")
             print(f"Instance {instance_id} was created but may still be starting up.")
 
+    def _mount_volumes_via_ssh(self, host_name: str, profile: Dict) -> None:
+        """Mount attached EBS volumes via SSH.
+
+        Args:
+            host_name: SSH host name (e.g., spotman-myinstance)
+            profile: Profile configuration containing attach_volumes list
+        """
+        import subprocess
+        import time
+
+        attach_volumes = profile.get('attach_volumes', [])
+        volumes_to_mount = [v for v in attach_volumes if v.get('mount_point')]
+
+        if not volumes_to_mount:
+            return
+
+        print("Waiting for SSH to be ready...")
+        # Wait for SSH to be available (cloud-init may still be running)
+        for attempt in range(12):
+            try:
+                result = subprocess.run(
+                    ['ssh', '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', host_name, 'echo ready'],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    break
+            except subprocess.TimeoutExpired:
+                pass
+            time.sleep(5)
+        else:
+            print("Warning: SSH not ready, skipping volume mount")
+            return
+
+        print(f"Mounting {len(volumes_to_mount)} volume(s)...")
+
+        for vol_config in volumes_to_mount:
+            volume_id = vol_config.get('volume_id')
+            mount_point = vol_config.get('mount_point')
+
+            if not volume_id or not mount_point:
+                continue
+
+            # AWS volume ID format: vol-xxx -> nvme device link is by volume ID
+            vol_id_suffix = volume_id.replace('-', '')
+
+            # Build mount commands - use UUID for fstab to be device-name independent
+            mount_cmds = f'''
+                set -e
+                # Find the NVMe device for this volume
+                DEVICE=$(readlink -f /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{vol_id_suffix} 2>/dev/null)
+                if [ -z "$DEVICE" ]; then
+                    # Try alternate naming
+                    DEVICE=$(lsblk -o NAME,SERIAL -n | grep {vol_id_suffix} | awk '{{print "/dev/"$1}}' | head -1)
+                fi
+                if [ -z "$DEVICE" ]; then
+                    echo "ERROR: Could not find device for {volume_id}"
+                    exit 1
+                fi
+                # Check if it has a partition
+                PART="${{DEVICE}}p1"
+                if [ -b "$PART" ]; then
+                    DEVICE="$PART"
+                elif [ -b "${{DEVICE}}1" ]; then
+                    DEVICE="${{DEVICE}}1"
+                fi
+
+                # Get UUID for fstab (more reliable than device names)
+                UUID=$(sudo blkid -s UUID -o value $DEVICE)
+                if [ -z "$UUID" ]; then
+                    echo "ERROR: Could not get UUID for $DEVICE"
+                    exit 1
+                fi
+
+                # Create mount point
+                sudo mkdir -p {mount_point}
+
+                # Add to fstab if not already present
+                if ! grep -q "UUID=$UUID" /etc/fstab; then
+                    echo "UUID=$UUID {mount_point} auto defaults,nofail 0 2" | sudo tee -a /etc/fstab > /dev/null
+                fi
+
+                # Mount (use fstab entry)
+                sudo mount {mount_point}
+                echo "Mounted $DEVICE (UUID=$UUID) at {mount_point}"
+            '''
+
+            try:
+                result = subprocess.run(
+                    ['ssh', host_name, 'bash', '-c', mount_cmds],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    print(f"  ✓ {volume_id} -> {mount_point}")
+                else:
+                    print(f"  ✗ {volume_id}: {result.stderr.strip()}")
+            except Exception as e:
+                print(f"  ✗ {volume_id}: {e}")
+
     def _attach_volumes(self, instance_id: str, profile: Dict) -> None:
         """Attach existing EBS volumes to an instance.
 
@@ -1267,6 +1365,10 @@ class AWSInstanceManager:
             # Attach any existing EBS volumes specified in profile
             self._attach_volumes(instance_id, profile)
 
+            # Mount volumes via SSH if mount points specified
+            host_name = f"spotman-{instance_name}"
+            self._mount_volumes_via_ssh(host_name, profile)
+
             return instance_id
 
         except ClientError as e:
@@ -1415,6 +1517,13 @@ class AWSInstanceManager:
             response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
             instance = response['Reservations'][0]['Instances'][0]
 
+            # Get instance name for SSH cleanup
+            instance_name = None
+            for tag in instance.get('Tags', []):
+                if tag['Key'] == 'Name':
+                    instance_name = tag['Value']
+                    break
+
             # Cancel spot request if present
             spot_request_id = instance.get('SpotInstanceRequestId')
             if spot_request_id:
@@ -1431,6 +1540,14 @@ class AWSInstanceManager:
             print("⚠️  This action cannot be undone!")
             self.ec2_client.terminate_instances(InstanceIds=[instance_id])
             print("✅ Termination request sent successfully.")
+
+            # Remove SSH config entry
+            if instance_name:
+                host_name = f"spotman-{instance_name}"
+                ssh_mgr = SSHConfigManager()
+                if ssh_mgr.remove_entry(host_name):
+                    print(f"✅ Removed SSH config entry: {host_name}")
+
             return True
         except ClientError as e:
             print(f"Error terminating instance: {e}")
