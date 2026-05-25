@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""
+Hetzman - Hetzner Dedicated Server Management CLI
+
+Companion tool to SpotMan for managing Hetzner bare metal servers.
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# Add parent dir to path for hetzman_core
+sys.path.insert(0, str(Path(__file__).parent))
+
+from hetzman_core import HetznerManager, HetznerError, HetznerAuthError
+
+
+def cmd_list(args, manager: HetznerManager):
+    """List all servers."""
+    servers = manager.list_servers()
+
+    if not servers:
+        print("No servers found")
+        return
+
+    # Header
+    print(f"{'IP':<16} {'Name':<20} {'Product':<15} {'DC':<6} {'Status':<10}")
+    print("-" * 75)
+
+    for s in servers:
+        status = s['status']
+        if s['cancelled']:
+            status = "cancelled"
+
+        print(f"{s['ip']:<16} {s['name'] or '-':<20} {s['product'] or '-':<15} "
+              f"{s['datacenter'] or '-':<6} {status:<10}")
+
+
+def cmd_info(args, manager: HetznerManager):
+    """Show server details."""
+    server = manager.get_server(args.server)
+    print(json.dumps(server, indent=2))
+
+
+def cmd_rescue(args, manager: HetznerManager):
+    """Activate rescue mode."""
+    if args.deactivate:
+        result = manager.deactivate_rescue(args.server)
+        print("Rescue mode deactivated")
+    else:
+        result = manager.activate_rescue(
+            args.server,
+            os=args.os,
+            arch=args.arch
+        )
+        print(f"Rescue mode activated")
+        if result.get("password"):
+            print(f"Password: {result['password']}")
+        print("\nNext: Reset the server to boot into rescue mode")
+
+
+def cmd_reset(args, manager: HetznerManager):
+    """Reset server."""
+    result = manager.reset_server(args.server, args.type)
+    print(f"Reset initiated ({args.type})")
+
+
+def cmd_provision(args, manager: HetznerManager):
+    """Provision with PREEMPT-RT."""
+    print(f"Provisioning {args.server} with PREEMPT-RT...")
+    print("This will take 10-15 minutes.\n")
+
+    success = manager.provision_preempt_rt(
+        args.server,
+        ssh_pubkey=args.ssh_key,
+        housekeeping_cpus=args.housekeeping_cpus
+    )
+
+    if success:
+        print("\nProvisioning complete!")
+        print("\nNext steps:")
+        print("  1. Deactivate rescue mode: hetzman rescue --deactivate <server>")
+        print("  2. Reset server: hetzman reset <server>")
+        print("  3. Wait ~90 seconds for boot")
+        print(f"  4. SSH: ssh root@{args.server}")
+    else:
+        print("\nProvisioning failed!")
+        sys.exit(1)
+
+
+def cmd_cancel(args, manager: HetznerManager):
+    """Cancel server."""
+    if args.revoke:
+        result = manager.revoke_cancellation(args.server)
+        print("Cancellation revoked")
+    else:
+        result = manager.cancel_server(args.server, args.date)
+        print(f"Server {args.server} cancelled")
+        if result.get("cancellation_date"):
+            print(f"Cancellation date: {result['cancellation_date']}")
+
+
+def cmd_keys(args, manager: HetznerManager):
+    """List SSH keys."""
+    keys = manager.list_ssh_keys()
+
+    if not keys:
+        print("No SSH keys found")
+        return
+
+    print(f"{'Name':<30} {'Type':<10} {'Size':<6} {'Fingerprint'}")
+    print("-" * 80)
+
+    for k in keys:
+        print(f"{k['name']:<30} {k['type'] or '-':<10} {k['size'] or '-':<6} "
+              f"{k['fingerprint']}")
+
+
+def cmd_ssh(args, manager: HetznerManager):
+    """SSH to server."""
+    os.execvp("ssh", ["ssh", f"root@{args.server}"])
+
+
+def cmd_wait(args, manager: HetznerManager):
+    """Wait for SSH to become available."""
+    if manager.wait_for_ssh(args.server, timeout=args.timeout):
+        print(f"SSH available on {args.server}")
+    else:
+        print(f"Timeout waiting for SSH on {args.server}")
+        sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Hetzner Dedicated Server Management",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  hetzman list                    List all servers
+  hetzman info 1.2.3.4            Show server details
+  hetzman rescue 1.2.3.4          Activate rescue mode
+  hetzman reset 1.2.3.4           Hardware reset
+  hetzman provision 1.2.3.4       Install PREEMPT-RT (from rescue)
+  hetzman cancel 1.2.3.4          Cancel server
+
+Environment:
+  HETZNER_USER    Robot API username
+  HETZNER_PASS    Robot API password
+"""
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # list
+    p_list = subparsers.add_parser("list", aliases=["ls"], help="List servers")
+    p_list.set_defaults(func=cmd_list)
+
+    # info
+    p_info = subparsers.add_parser("info", help="Show server details")
+    p_info.add_argument("server", help="Server IP")
+    p_info.set_defaults(func=cmd_info)
+
+    # rescue
+    p_rescue = subparsers.add_parser("rescue", help="Manage rescue mode")
+    p_rescue.add_argument("server", help="Server IP")
+    p_rescue.add_argument("--deactivate", "-d", action="store_true",
+                          help="Deactivate rescue mode")
+    p_rescue.add_argument("--os", default="linux",
+                          choices=["linux", "linuxold", "vkvm"],
+                          help="Rescue OS (default: linux)")
+    p_rescue.add_argument("--arch", type=int, default=64,
+                          choices=[32, 64], help="Architecture")
+    p_rescue.set_defaults(func=cmd_rescue)
+
+    # reset
+    p_reset = subparsers.add_parser("reset", help="Reset server")
+    p_reset.add_argument("server", help="Server IP")
+    p_reset.add_argument("--type", "-t", default="hw",
+                         choices=["sw", "hw", "man"],
+                         help="Reset type (default: hw)")
+    p_reset.set_defaults(func=cmd_reset)
+
+    # provision
+    p_provision = subparsers.add_parser("provision", help="Provision PREEMPT-RT")
+    p_provision.add_argument("server", help="Server IP")
+    p_provision.add_argument("--ssh-key", "-k", help="SSH public key path")
+    p_provision.add_argument("--housekeeping-cpus", type=int, default=2,
+                             help="CPUs for housekeeping (default: 2)")
+    p_provision.set_defaults(func=cmd_provision)
+
+    # cancel
+    p_cancel = subparsers.add_parser("cancel", help="Cancel server")
+    p_cancel.add_argument("server", help="Server IP")
+    p_cancel.add_argument("--date", help="Cancellation date (YYYY-MM-DD)")
+    p_cancel.add_argument("--revoke", "-r", action="store_true",
+                          help="Revoke cancellation")
+    p_cancel.set_defaults(func=cmd_cancel)
+
+    # keys
+    p_keys = subparsers.add_parser("keys", help="List SSH keys")
+    p_keys.set_defaults(func=cmd_keys)
+
+    # ssh
+    p_ssh = subparsers.add_parser("ssh", help="SSH to server")
+    p_ssh.add_argument("server", help="Server IP")
+    p_ssh.set_defaults(func=cmd_ssh)
+
+    # wait
+    p_wait = subparsers.add_parser("wait", help="Wait for SSH")
+    p_wait.add_argument("server", help="Server IP")
+    p_wait.add_argument("--timeout", "-t", type=int, default=300,
+                        help="Timeout in seconds (default: 300)")
+    p_wait.set_defaults(func=cmd_wait)
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    # Handle 'ls' alias
+    if args.command == "ls":
+        args.func = cmd_list
+
+    try:
+        manager = HetznerManager()
+        args.func(args, manager)
+    except HetznerAuthError as e:
+        print(f"Authentication error: {e}", file=sys.stderr)
+        print("\nSet HETZNER_USER and HETZNER_PASS environment variables",
+              file=sys.stderr)
+        sys.exit(1)
+    except HetznerError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nInterrupted")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
