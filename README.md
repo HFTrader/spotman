@@ -222,6 +222,36 @@ tags:
 user_data: !include scripts/setup.sh
 ```
 
+### Setup Steps (run over SSH, may reboot)
+
+User data runs once, inside the instance, at first boot. Work that needs files from your machine
+or a reboot (kernel command line changes such as CPU isolation) goes in `setup_steps`: `spotman create`
+runs them as soon as SSH answers, and `spotman setup INSTANCE` runs them again later. Each step is one
+of `wait_for` (remote command retried until it exits 0), `copy` (local file or directory to a remote
+directory), `run` (remote bash script under `set -e`) or `reboot: true` (reboot and wait for SSH).
+`skip_if` (remote command; exit 0 skips the step) makes reruns idempotent. The first failing step stops
+the sequence. `create --no-setup` skips them. Details in `spotman_setup.py`.
+
+```yaml
+shutdown_behavior: "terminate"   # a poweroff from inside terminates instead of stopping
+setup_steps:
+  - name: first boot finished
+    wait_for: test -e /var/lib/cloud/instance/boot-finished
+  - name: copy a tool
+    copy: {src: ~/git/tests/cpu-isolation, dest: ~/tmp/cpu-isolation}
+  - name: change the kernel command line
+    skip_if: grep -q isolcpus= /proc/cmdline
+    run: |
+      sudo sed -i 's/^GRUB_CMDLINE_LINUX="/&isolcpus=8-95 /' /etc/default/grub
+      sudo update-grub
+  - name: reboot into it
+    skip_if: grep -q isolcpus= /proc/cmdline
+    reboot: true
+```
+
+`profiles/zen5-c8a-metal.yaml` is a full example: an AWS c8a.metal-24xl (Zen 5) isolated for
+benchmarking, with a 6 h self-poweroff backstop.
+
 ### AMI Configuration
 
 SpotMan can automatically find the latest AMI for supported operating systems, or you can specify an exact AMI.

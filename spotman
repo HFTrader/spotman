@@ -156,7 +156,14 @@ Examples:
     create_parser.add_argument('--spot', action='store_true', help='Force spot instance (override profile)')
     create_parser.add_argument('--on-demand', action='store_true', help='Force on-demand instance (override profile)')
     create_parser.add_argument('--dry-run', action='store_true', help='Validate without creating')
-    
+    create_parser.add_argument('--no-setup', action='store_true',
+                               help="Skip the profile's setup_steps (run later with: spotman setup)")
+
+    # Setup command (profile setup_steps on an existing instance)
+    setup_parser = subparsers.add_parser('setup', help="Run the profile's setup_steps on an existing instance")
+    setup_parser.add_argument('instance', help='Instance name or ID')
+    setup_parser.add_argument('--profile', help='Profile whose steps to run (default: the instance Profile tag)')
+
     # List command
     list_parser = subparsers.add_parser('list', help='List instances')
     list_parser.add_argument('--class', help='Filter by application class')
@@ -264,7 +271,8 @@ Examples:
             args.spot_price,
             args.dry_run,
             args.az,
-            spot_override=spot_override
+            spot_override=spot_override,
+            run_setup=not args.no_setup
         )
 
         if instance_id and not args.dry_run:
@@ -316,6 +324,10 @@ Examples:
     
     elif args.command == 'terminate':
         manager.terminate_instance(args.instance)
+
+    elif args.command == 'setup':
+        if not manager.setup_instance(args.instance, args.profile):
+            sys.exit(1)
     
     elif args.command == 'hibernation-status':
         manager.check_hibernation_status(args.instance)

@@ -1259,7 +1259,8 @@ class AWSInstanceManager:
     @AWSErrorHandler.retry_on_aws_error(max_retries=3, delay=2.0)
     def create_instance(self, profile_name: str, instance_name: str, app_class: str = None,
                        spot_price: float = None, dry_run: bool = False,
-                       availability_zone: str = None, spot_override: bool = None) -> Optional[str]:
+                       availability_zone: str = None, spot_override: bool = None,
+                       run_setup: bool = True) -> Optional[str]:
         """Create a new EC2 instance based on a profile.
 
         Args:
@@ -1270,6 +1271,7 @@ class AWSInstanceManager:
             dry_run: If True, validate parameters without creating instance
             availability_zone: Specific AZ to launch in (e.g., us-east-1a)
             spot_override: If True, force spot; if False, force on-demand; if None, use profile
+            run_setup: If True, run the profile's setup_steps once SSH is up (see spotman_setup.py)
 
         Returns:
             Instance ID if successful, None otherwise
@@ -1332,6 +1334,9 @@ class AWSInstanceManager:
                 run_params['SubnetId'] = subnet_id
             if availability_zone:
                 run_params['Placement'] = {'AvailabilityZone': availability_zone}
+            # 'stop' or 'terminate': what a poweroff from inside the instance does
+            if profile.get('shutdown_behavior'):
+                run_params['InstanceInitiatedShutdownBehavior'] = profile['shutdown_behavior']
 
             encoded_user_data = self._prepare_user_data(profile)
             if encoded_user_data:
@@ -1369,6 +1374,14 @@ class AWSInstanceManager:
             host_name = f"spotman-{instance_name}"
             self._mount_volumes_via_ssh(host_name, profile)
 
+            # Profile setup steps (may reboot the instance several times)
+            if run_setup and profile.get('setup_steps'):
+                from spotman_setup import run_setup_steps
+                profiles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'profiles')
+                if not run_setup_steps(host_name, profile['setup_steps'], profiles_dir):
+                    print(f"Instance {instance_id} is running but setup did not finish. "
+                          f"Rerun with: ./spotman setup {instance_name}")
+
             return instance_id
 
         except ClientError as e:
@@ -1380,6 +1393,36 @@ class AWSInstanceManager:
         except Exception as e:
             print(f"Unexpected error creating instance: {e}")
             return None
+
+    def setup_instance(self, instance_identifier: str, profile_name: str = None) -> bool:
+        """Run a profile's setup_steps on an existing instance.
+
+        Args:
+            instance_identifier: Instance name or ID
+            profile_name: Profile whose steps to run (default: the instance's Profile tag)
+
+        Returns:
+            True if every step passed or was skipped
+        """
+        from spotman_setup import run_setup_steps
+        instance_id = self._resolve_instance_identifier(instance_identifier)
+        if not instance_id:
+            return False
+        instance = self.ec2_client.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
+        tags = {t['Key']: t['Value'] for t in instance.get('Tags', [])}
+        profile_name = profile_name or tags.get('Profile')
+        if not profile_name:
+            print(f"Instance {instance_id} has no Profile tag; pass --profile")
+            return False
+        profile = self.get_profile(profile_name, required=True)
+        steps = profile.get('setup_steps') or []
+        if not steps:
+            print(f"Profile {profile_name} has no setup_steps")
+            return True
+        host_name = f"spotman-{tags.get('Name', instance_id)}"
+        self._add_ssh_config_entry(instance_id, host_name)
+        profiles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'profiles')
+        return run_setup_steps(host_name, steps, profiles_dir)
 
     def _log_instance_creation(self, instance_name: str, profile_name: str, instance_type: str,
                                ami_id: str, availability_zone: str, spot_instance: bool,
