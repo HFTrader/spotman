@@ -354,9 +354,12 @@ class InstanceResolver:
             Instance ID or None if not found. Also updates self.region and
             self.ec2_client if found in another region.
         """
-        # If it looks like an instance ID, return as-is
+        other_regions = [r for r in self.regions_config.get('regions', {}).keys()
+                        if r != self.region]
+
+        # Instance IDs are unambiguous but region-scoped: find the region that holds it
         if identifier.startswith('i-') and len(identifier) >= 10:
-            return identifier
+            return self._resolve_id(identifier, other_regions)
 
         # Search current region first
         instances = self._find_in_region(identifier, include_terminated)
@@ -364,9 +367,6 @@ class InstanceResolver:
             return self._handle_found_instances(instances, identifier, self.region)
 
         # Search other configured regions
-        other_regions = [r for r in self.regions_config.get('regions', {}).keys()
-                        if r != self.region]
-
         for region in other_regions:
             try:
                 other_client = self.session.client('ec2', region_name=region)
@@ -386,6 +386,42 @@ class InstanceResolver:
                 continue
 
         print(f"No instance found with name: {identifier}")
+        return None
+
+    def _region_has_id(self, ec2_client, instance_id: str) -> bool:
+        """Return True if the region behind ec2_client knows this instance ID."""
+        try:
+            response = ec2_client.describe_instances(InstanceIds=[instance_id])
+        except ClientError as e:
+            code = e.response.get('Error', {}).get('Code', '')
+            if code in ('InvalidInstanceID.NotFound', 'InvalidInstanceID.Malformed'):
+                return False
+            raise
+        return any(r['Instances'] for r in response['Reservations'])
+
+    def _resolve_id(self, instance_id: str, other_regions: list) -> Optional[str]:
+        """Locate an instance ID across regions, switching to the region that holds it.
+
+        Previously IDs were returned as-is and then used against the default
+        region's client, which fails with InvalidInstanceID.NotFound for any
+        instance living elsewhere.
+        """
+        if self._region_has_id(self.ec2_client, instance_id):
+            return instance_id
+
+        for region in other_regions:
+            try:
+                other_client = self.session.client('ec2', region_name=region)
+                if self._region_has_id(other_client, instance_id):
+                    print(f"Found instance {instance_id} in region {region}")
+                    self.region = region
+                    self.ec2_client = other_client
+                    return instance_id
+            except Exception:
+                continue
+
+        print(f"No instance found with ID: {instance_id} "
+              f"(searched {self.region} and {len(other_regions)} other configured regions)")
         return None
 
     def _handle_found_instances(self, instances: list, identifier: str,
@@ -1533,7 +1569,8 @@ class AWSInstanceManager:
             print(f"{action} instance: {instance_identifier} ({instance_id})")
             method = getattr(self.ec2_client, ec2_method)
             method(InstanceIds=[instance_id], **kwargs)
-            print(f"✅ {action.rstrip('ing')} request sent successfully.")
+            verb = {"Starting": "Start", "Stopping": "Stop"}.get(action, action)
+            print(f"✅ {verb} request sent successfully.")
             return True
         except ClientError as e:
             print(f"Error {action.lower()} instance: {e}")
