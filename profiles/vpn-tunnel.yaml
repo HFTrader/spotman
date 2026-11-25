@@ -1,0 +1,21 @@
+# Minimal SSH/SOCKS tunnel box (São Paulo)
+# Smallest/cheapest spot instance — just sshd, no extra setup.
+
+instance_type: "t3.nano"   # 2 vCPU burst / 512MB — plenty for an SSH tunnel
+spot_instance: true
+hibernation_enabled: false
+
+root_volume_size: 8        # GB minimum for Ubuntu AMI
+root_volume_type: "gp3"
+
+os_type: "ubuntu"
+update_os: false           # skip updates — quick disposable box
+
+key_name: "amz-sp"         # sa-east-1 key pair (regions.yaml lacks sa-east-1 entry)
+
+tags:
+  ApplicationClass: "vpn-tunnel"
+  Environment: "personal"
+  InstanceType: "spot"
+  Purpose: "ssh-socks-tunnel"
+  ManagedBy: "spotman"
