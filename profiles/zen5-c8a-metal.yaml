@@ -1,0 +1,94 @@
+# Zen 5 benchmark box - AWS c8a.metal-24xl (spot), isolated for cycle-accurate runs
+# AMD EPYC 9R45 (Turin, Zen 5), 96 cores, 1 thread per core, 192 GB, 12 x DDR5-6400, one NUMA node.
+# 12 CCXs of 8 cores (0-7 ... 88-95), 48 KB L1d, 1 MB L2 per core, 32 MB L3 per CCX (384 MB total).
+# Base 2.6 GHz, boost to 4.5 GHz. cpuidle: acpi_idle POLL/C1/C2. cpufreq: amd-pstate-epp.
+# First used 2026-11-25 for the substack article cpp-performance/zen-l3-ccx-ccd (results/aws).
+
+# Instance configuration
+instance_type: "c8a.metal-24xl"
+spot_instance: true
+hibernation_enabled: false          # one-time spot request, terminate on interruption
+spot_price: 2.00                    # cap, USD/h; spot ran $1.08-1.31 in us-east-1a-d on 2026-11-25 (on demand $5.17)
+
+# Ubuntu 26.04, the exact image used on 2026-11-25 (kernel 7.0.0-1018-aws).
+# If AWS retires it, delete ami_id and spotman will take the newest image matching ami_name.
+ami_id: "ami-0c30b7300f5fb34cd"     # us-east-1 only
+ami_name: "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-*"
+os_type: "ubuntu"
+update_os: false                    # no full upgrade: keeps the kernel the results were taken on
+
+# Storage
+root_volume_size: 40
+root_volume_type: "gp3"
+root_volume_encrypted: false
+
+# A poweroff from inside (the 6 h backstop below) terminates the instance instead of stopping it.
+shutdown_behavior: "terminate"
+
+# First boot (as root): 6 h self-poweroff, irqbalance off, perf counters open, g++-14.
+user_data: !include ../scripts/zen5-metal-setup.sh
+
+# Run from the laptop by `spotman create` once SSH is up (or later: ./spotman setup <alias>).
+# Isolation uses ~/git/tests/cpu-isolation (not in git, so it is copied over) and one reboot.
+# Two workarounds from 2026-11-25 are built in: Ubuntu 26.04's sudo ignores -E, so the plan is passed
+# with `sudo env`; the kit's irqbalance mask is 64-bit, so irqbalance is off (first boot) and any IRQ
+# left on 8-95 is moved to 0-7. verify-isolation.sh then still prints one expected FAIL (irqbalance mask).
+setup_steps:
+  - name: first-boot setup finished
+    wait_for: test -e /var/lib/zen5-setup-done
+    timeout: 1200
+  - name: copy the isolation kit
+    copy: {src: ~/git/tests/cpu-isolation, dest: ~/tmp/cpu-isolation}
+  - name: plan and apply isolation (8-95 isolated, CCX 0 = 0-7 housekeeping, 2048 hugepages)
+    skip_if: grep -q isolcpus= /proc/cmdline
+    run: |
+      cd ~/tmp/cpu-isolation
+      eval "$(python3 plan-isolation.py --housekeeping 8 --shell)"
+      if [ "$ISOL_CORES" != "8-95" ] || [ "$HOUSEKEEPING_LIST" != "0-7" ]; then
+        echo "unexpected plan: isol=$ISOL_CORES hk=$HOUSEKEEPING_LIST"; exit 1
+      fi
+      if grep -q '^GRUB_CMDLINE_LINUX=.*isolcpus' /etc/default/grub; then
+        echo "GRUB already has isolcpus but the running kernel does not"; exit 1
+      fi
+      sudo env ISOL_CORES="$ISOL_CORES" HOUSEKEEPING_LIST="$HOUSEKEEPING_LIST" HUGEPAGES_2M=2048 \
+        bash setup-isolation.sh | grep -E "Isolated|Housekeeping|Added to GRUB|enabled|complete"
+  - name: reboot into the isolated kernel command line (metal, 3-5 min)
+    skip_if: grep -q isolcpus= /proc/cmdline
+    reboot: true
+    timeout: 1200
+  - name: move stray IRQs to 0-7 and verify
+    run: |
+      for d in /proc/irq/[0-9]*; do
+        e=$(cat $d/effective_affinity_list 2>/dev/null) || continue
+        f=${e%%[-,]*}
+        if [ -n "$f" ] && [ "$f" -ge 8 ]; then echo 0-7 | sudo tee $d/smp_affinity_list >/dev/null 2>&1 || true; fi
+      done
+      (cd ~/tmp/cpu-isolation && sudo bash verify-isolation.sh 2>&1 | grep -E "PASS|FAIL|passed") || true
+      grep -q 'isolcpus=managed_irq,domain,8-95' /proc/cmdline || { echo "isolcpus 8-95 not active"; exit 1; }
+      [ "$(cat /sys/devices/system/cpu/cpufreq/boost)" = 0 ] || { echo "boost still on"; exit 1; }
+      grep -q 'HugePages_Total: *2048' /proc/meminfo || { echo "hugepages not reserved"; exit 1; }
+      echo "isolated: boost=0, cpu8 max $(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_max_freq) kHz, 2048 hugepages"
+      echo "poweroff backstop at $(date -u -d @$(cat /etc/spotman-deadline))"
+
+tags:
+  ApplicationClass: "benchmark"
+  Environment: "experiment"
+  InstanceType: "spot"
+  Purpose: "isolated-cpu-benchmark"
+  Architecture: "zen5"
+  ManagedBy: "spotman"
+
+# Usage:
+#   ./spotman price --profile zen5-c8a-metal                 # spot price + capacity score per AZ
+#   ./spotman create --profile zen5-c8a-metal --alias zen5 --class benchmark --az us-east-1c
+#       creates, waits for SSH, then runs setup_steps (isolation + reboot + verify), ~10 min in all.
+#       On 2026-11-25 1a, 1b and 1d had no spot capacity and 1c did: try AZs in price order.
+#   ./spotman setup zen5                                     # rerun the steps (idempotent)
+#   ssh spotman-zen5                                         # work in ~/tmp/<project>
+#   ./spotman terminate zen5                                 # when done; the 6 h poweroff is only a backstop
+#
+# After setup: housekeeping CCX 0 (cores 0-7, C1/C2 on, use it for idle tests), isolated 8-95
+# (POLL only, boost off, 2.6 GHz pinned, nohz_full, rcu_nocbs, IRQs on 0-7), THP off, 2048 x 2 MB hugepages.
+# Extend the backstop: ssh spotman-zen5 'echo $(( $(date +%s) + 3*3600 )) | sudo tee /etc/spotman-deadline'
+# For a boost check on a few cores: echo 1 > /sys/devices/system/cpu/cpufreq/boost and raise
+# scaling_max_freq on those cores to cpuinfo_max_freq; put both back afterwards.
