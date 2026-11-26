@@ -22,6 +22,13 @@ update_os: false                    # no full upgrade: keeps the kernel the resu
 
 # Storage
 root_volume_size: 40
+
+# Round boxes: their own key (private half only on hz2, ~/.ssh/zen5-round) and a
+# security group that admits SSH from hz2 only (148.251.68.177/32). Both exist,
+# under the same names, in us-east-1, us-east-2, us-west-2, us-west-1 and
+# ap-northeast-1 (2026-11-26). The default groups of us-west-1/2 have no SSH rule.
+key_name: "zen5-round"
+security_groups: ["zen5-round"]
 root_volume_type: "gp3"
 root_volume_encrypted: false
 
