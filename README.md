@@ -250,7 +250,8 @@ setup_steps:
 ```
 
 `profiles/zen5-c8a-metal.yaml` is a full example: an AWS c8a.metal-24xl (Zen 5) isolated for
-benchmarking, with a 6 h self-poweroff backstop.
+benchmarking, with a 6 h self-poweroff backstop. How to start, use and stop it:
+[ZEN5-BENCHMARK-BOX.md](ZEN5-BENCHMARK-BOX.md).
 
 ### AMI Configuration
 
