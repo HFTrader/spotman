@@ -1364,7 +1364,19 @@ class AWSInstanceManager:
             }
 
             # Add optional parameters
-            if profile.get('security_groups'):
+            if profile.get('security_groups') and subnet_id:
+                # EC2 refuses group names together with a subnet
+                # (InvalidParameterCombination): use the ids of those groups in the subnet's VPC.
+                vpc_id = self.ec2_client.describe_subnets(SubnetIds=[subnet_id])['Subnets'][0]['VpcId']
+                groups = self.ec2_client.describe_security_groups(Filters=[
+                    {'Name': 'group-name', 'Values': list(profile['security_groups'])},
+                    {'Name': 'vpc-id', 'Values': [vpc_id]}])['SecurityGroups']
+                missing = set(profile['security_groups']) - {g['GroupName'] for g in groups}
+                if missing:
+                    print(f"Error: security group(s) {', '.join(sorted(missing))} not found in {vpc_id}.")
+                    return None
+                run_params['SecurityGroupIds'] = [g['GroupId'] for g in groups]
+            elif profile.get('security_groups'):
                 run_params['SecurityGroups'] = profile['security_groups']
             if subnet_id:
                 run_params['SubnetId'] = subnet_id
