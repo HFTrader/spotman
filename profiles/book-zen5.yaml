@@ -1,0 +1,108 @@
+# Book box - AWS c8a.metal-24xl (spot) for the Measured volumes (Low Latency Trading Insights, Vol. 3)
+# Same machine, image build and isolation as zen5-c8a-metal (the 2026-11-25 book leg: cores 8-95 isolated,
+# boost off, 2.6 GHz), so the chapter-2 corrective run of 2026-11-26 compares with that leg.
+# Kept apart from the Zen 5 rounds (zen5-c8a-rounds, run from hz2): its own profile, box names book-*,
+# the laptop's key for the region, its own security group, its own known-hosts file
+# (~/.ssh/config: Host spotman-book-* UserKnownHostsFile ~/.ssh/known_hosts.book-zen5),
+# and never us-east-1c, where the rounds find their capacity. Prefer us-west-2.
+# Written 2026-11-26 from zen5-c8a-metal and zen5-c8a-rounds; neither is changed.
+
+instance_type: "c8a.metal-24xl"
+spot_instance: true
+hibernation_enabled: false
+spot_price: 2.00                    # cap, USD/h; us-west-2 spot was $1.01-1.92 on 2026-11-26
+
+# Ubuntu 26.04 build 20261120, the build of ami-0c30b7300f5fb34cd (us-east-1, kernel 7.0.0-1018-aws)
+# that the 2026-11-25 leg ran on. This id is the same build in us-west-2.
+ami_id: "ami-0087d113babc82cbe"     # us-west-2 only
+ami_name: "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20261120"
+os_type: "ubuntu"
+update_os: false
+
+root_volume_size: 40
+root_volume_type: "gp3"
+root_volume_encrypted: false
+
+# The laptop's key for us-west-2 (regions.yaml default_key) and a group that admits SSH
+# from the laptop's address only. Not the rounds' zen5-round key or group.
+key_name: "amz-sp"
+security_groups: ["book-zen5"]
+
+shutdown_behavior: "terminate"
+
+# First boot as for zen5-c8a-metal: self-poweroff (6 h, pulled in to 4 h below), irqbalance off,
+# perf_event_paranoid 1, g++-14.
+user_data: !include ../scripts/zen5-metal-setup.sh
+
+setup_steps:
+  - name: first-boot setup finished
+    wait_for: test -e /var/lib/zen5-setup-done
+    timeout: 1200
+  - name: poweroff backstop 4 h from now
+    run: |
+      echo $(( $(date +%s) + 4*3600 )) | sudo tee /etc/spotman-deadline >/dev/null
+      echo "poweroff backstop at $(date -u -d @$(cat /etc/spotman-deadline))"
+  - name: copy the isolation kit
+    copy: {src: ~/git/tests/cpu-isolation, dest: ~/tmp/cpu-isolation}
+  - name: plan and apply isolation (8-95 isolated, CCX 0 = 0-7 housekeeping, 2048 hugepages)
+    skip_if: grep -q isolcpus= /proc/cmdline
+    run: |
+      cd ~/tmp/cpu-isolation
+      eval "$(python3 plan-isolation.py --housekeeping 8 --shell)"
+      if [ "$ISOL_CORES" != "8-95" ] || [ "$HOUSEKEEPING_LIST" != "0-7" ]; then
+        echo "unexpected plan: isol=$ISOL_CORES hk=$HOUSEKEEPING_LIST"; exit 1
+      fi
+      if grep -q '^GRUB_CMDLINE_LINUX=.*isolcpus' /etc/default/grub; then
+        echo "GRUB already has isolcpus but the running kernel does not"; exit 1
+      fi
+      sudo env ISOL_CORES="$ISOL_CORES" HOUSEKEEPING_LIST="$HOUSEKEEPING_LIST" HUGEPAGES_2M=2048 \
+        bash setup-isolation.sh | grep -E "Isolated|Housekeeping|Added to GRUB|enabled|complete"
+  - name: reboot into the isolated kernel command line (metal, 3-5 min)
+    skip_if: grep -q isolcpus= /proc/cmdline
+    reboot: true
+    timeout: 1200
+  - name: move stray IRQs to 0-7 and verify
+    run: |
+      for d in /proc/irq/[0-9]*; do
+        e=$(cat $d/effective_affinity_list 2>/dev/null) || continue
+        f=${e%%[-,]*}
+        if [ -n "$f" ] && [ "$f" -ge 8 ]; then echo 0-7 | sudo tee $d/smp_affinity_list >/dev/null 2>&1 || true; fi
+      done
+      (cd ~/tmp/cpu-isolation && sudo bash verify-isolation.sh 2>&1 | grep -E "PASS|FAIL|passed") || true
+      grep -q 'isolcpus=managed_irq,domain,8-95' /proc/cmdline || { echo "isolcpus 8-95 not active"; exit 1; }
+      [ "$(cat /sys/devices/system/cpu/cpufreq/boost)" = 0 ] || { echo "boost still on"; exit 1; }
+      grep -q 'HugePages_Total: *2048' /proc/meminfo || { echo "hugepages not reserved"; exit 1; }
+      echo "isolated: boost=0, cpu8 max $(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_max_freq) kHz, 2048 hugepages"
+      echo "poweroff backstop at $(date -u -d @$(cat /etc/spotman-deadline))"
+  - name: book toolchain (clang-20, cmake, perf) and the counter check
+    run: |
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang-20 cmake xz-utils "linux-tools-$(uname -r)" >/dev/null
+      g++-14 --version | head -1; clang++-20 --version | head -1; cmake --version | head -1
+      perf stat -e cycles,instructions,cache-misses true 2>&1 | grep -E "cycles|instructions|cache-misses"
+  - name: machine record for the book
+    run: |
+      mkdir -p ~/tmp/book
+      { date -u; uname -a; lscpu | grep -E "Model name|^CPU\(s\)|Thread|MHz|boost"
+        echo "boost: $(cat /sys/devices/system/cpu/cpufreq/boost)"
+        echo "isolated: $(cat /sys/devices/system/cpu/isolated)"
+        echo "cpu8 governor $(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_governor), driver $(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_driver), min/max $(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_min_freq)/$(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_max_freq) kHz, cur $(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_cur_freq) kHz"
+        sudo dmesg | grep -iE "tsc.*(MHz|calibrat|clocksource)" | tail -3
+        echo "clocksource: $(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)"
+        cat /proc/cmdline
+        g++-14 --version | head -1; clang++-20 --version | head -1
+      } > ~/tmp/book/machine.txt
+      cat ~/tmp/book/machine.txt
+
+tags:
+  ApplicationClass: "benchmark"
+  Environment: "experiment"
+  InstanceType: "spot"
+  Purpose: "book-measured"
+  Architecture: "zen5"
+  ManagedBy: "spotman"
+
+# Usage (from the laptop, never from hz2):
+#   ./spotman --region us-west-2 price --profile book-zen5
+#   ./spotman --region us-west-2 create --profile book-zen5 --alias book-zen5 --class benchmark --az us-west-2d
+#   ssh spotman-book-zen5                      # work in ~/tmp/book/
+#   ./spotman terminate book-zen5              # then confirm in the EC2 API
